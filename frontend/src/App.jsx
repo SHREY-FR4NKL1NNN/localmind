@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import StatsBar from './components/StatsBar'
 import QueryInput from './components/QueryInput'
 import ResponsePanel from './components/ResponsePanel'
+import DecomposedPanel from './components/DecomposedPanel'
 import LiveFeed from './components/LiveFeed'
 import { getHealth } from './api'
 
@@ -50,7 +51,11 @@ export default function App() {
       <div className="app__columns">
         <div className="app__left">
           <QueryInput onResult={setLatest} />
-          <ResponsePanel result={latest} />
+          {Array.isArray(latest?.subtasks) ? (
+            <DecomposedPanel result={latest} />
+          ) : (
+            <ResponsePanel result={latest} />
+          )}
         </div>
         <LiveFeed />
       </div>

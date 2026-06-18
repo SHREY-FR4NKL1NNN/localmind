@@ -248,6 +248,21 @@ body {
   cursor: progress;
 }
 
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  accent-color: var(--accent-deepseek);
+  cursor: pointer;
+}
+
 .error-text {
   color: #dc2626;
   font-size: 13px;
@@ -349,9 +364,109 @@ body {
   overflow-y: auto;
 }
 
+.response-box--error {
+  border-color: rgba(220, 38, 38, 0.45);
+  color: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  .response-box--error {
+    color: #fca5a5;
+  }
+}
+
 .placeholder {
   color: var(--text-muted);
   font-size: 14px;
+}
+
+/* Decomposed (MoE) panel */
+.synthesis {
+  margin: 14px 0 18px;
+  padding: 14px;
+  border: 1px solid var(--accent-deepseek);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.synthesis__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.synthesis__label {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-deepseek);
+}
+
+.subtasks {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.subtask {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.subtask__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.subtask__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.subtask__metrics {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.subtask__text {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.reasoning--sm {
+  font-size: 12px;
+  margin: 6px 0 10px;
+  padding: 6px 10px;
 }
 
 /* Live feed */

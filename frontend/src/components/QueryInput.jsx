@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { postQuery } from '../api'
+import { postQuery, postQueryDecomposed } from '../api'
 
 export default function QueryInput({ onResult }) {
   const [query, setQuery] = useState('')
+  const [decompose, setDecompose] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -13,7 +14,9 @@ export default function QueryInput({ onResult }) {
     setLoading(true)
     setError('')
     try {
-      const result = await postQuery(trimmed)
+      const result = decompose
+        ? await postQueryDecomposed(trimmed)
+        : await postQuery(trimmed)
       onResult(result)
       setQuery('')
     } catch {
@@ -37,6 +40,15 @@ export default function QueryInput({ onResult }) {
         <button className="btn" onClick={handleSubmit} disabled={loading}>
           {loading ? 'Routing…' : 'Submit'}
         </button>
+        <label className="toggle" title="Split the query into sub-tasks, route each to its own expert in parallel, then synthesize.">
+          <input
+            type="checkbox"
+            checked={decompose}
+            onChange={(e) => setDecompose(e.target.checked)}
+            disabled={loading}
+          />
+          Decompose (MoE)
+        </label>
         {error && <span className="error-text">{error}</span>}
       </div>
     </div>

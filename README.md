@@ -2,12 +2,19 @@
 
 **Smart local LLM routing — the right model for the right query, entirely on your own machine.**
 
-LocalMind is a routing layer that sits in front of two locally-served language
-models and decides, per query, which one should answer. Simple, low-stakes
-queries go to **Mistral 7B** — fast and cheap on compute. Complex, multi-step,
-or technically demanding queries go to **DeepSeek R1** — slower but far more
-capable. Every decision is classified, logged, and visualised in a live
-dashboard.
+LocalMind is a routing layer that sits in front of several locally-served
+language models and decides, per query, which one should answer. It runs in two
+modes:
+
+- **Single-route** (`/query`) — the original flow. A query is classified on
+  complexity and privacy, then dispatched to one model: **Mistral 7B** for the
+  simple and **DeepSeek R1** for the hard.
+- **Tiered / Mixture-of-Experts-inspired** (`/query/decomposed`) — a query is
+  *decomposed* into sub-tasks, each sub-task is *gated* to one of four experts,
+  the chosen experts run **in parallel**, and their answers are **synthesized**
+  into one unified reply.
+
+Every decision is classified, logged, and visualised in a live dashboard.
 
 ## Why intelligent local routing matters
 
@@ -30,39 +37,86 @@ irrelevant — there's no API bill, after all. But the constraints just move:
 Everything is **fully local**: all inference goes through [Ollama](https://ollama.com)
 on `localhost`. No external API calls, no API keys, works offline.
 
+## The four experts
+
+The tiered flow routes among four locally-served models. Llama 3.2 does double
+duty: it is both the fast expert *and* the gating network that decomposes
+queries.
+
+| Expert          | Ollama tag       | Role                                                          |
+| --------------- | ---------------- | ------------------------------------------------------------- |
+| **Llama 3.2**   | `llama3.2`       | Fast tier for trivial sub-tasks **+** the decomposition gate. |
+| **Mistral 7B**  | `mistral`        | General-purpose tier **+** the synthesis/combiner step.       |
+| **DeepSeek R1** | `deepseek-r1:7b` | Reasoning tier for complex / multi-step sub-tasks.            |
+| **LLaVA**       | `llava`          | Vision tier; image-bearing sub-tasks are hard-routed here.    |
+
+> **A note on "MoE".** This is a rule-based gate *inspired by* Mixture-of-Experts
+> routing — it reproduces the **behaviour** (sparse, input-dependent expert
+> selection: only the chosen experts run) using transparent, explainable rules.
+> It is **not** a learned/trained gate. That trade is deliberate: every routing
+> decision carries a human-readable reason, which matters for a system whose
+> whole premise is trustworthy local inference.
+
 ## Architecture
+
+### Single-route flow (`/query`)
 
 ```
                          ┌──────────────────────────────────────┐
    Query  ──────────────▶│              Classifier              │
                          │  complexity score  ·  privacy score  │
                          └───────────────────┬──────────────────┘
-                                             │
                                              ▼
                          ┌──────────────────────────────────────┐
                          │                Router                │
                          │   apply policy · call model · time   │
                          └──────┬──────────────────────┬────────┘
-                                │                      │
                   complexity<0.4│         complexity≥0.7│
-                  (or sensitive)│      (or moderate+open)│
                                 ▼                      ▼
                      ┌────────────────┐     ┌────────────────────┐
                      │   Mistral 7B   │     │    DeepSeek R1     │
-                     │  (Ollama,fast) │     │  (Ollama, capable) │
                      └───────┬────────┘     └─────────┬──────────┘
-                             │                        │
                              └───────────┬────────────┘
                                          ▼
                          ┌──────────────────────────────────────┐
                          │     Response  +  Decision Log         │
-                         │   latency · scores · compute saved    │
                          └───────────────────┬──────────────────┘
                                              ▼
                                    React Dashboard (live)
 ```
 
+### Tiered MoE-inspired flow (`/query/decomposed`)
+
+```
+                         ┌──────────────────────────────────────┐
+   Query  ──────────────▶│   Gate · decompose (Llama 3.2)       │
+   (+ optional image)    │   recursive: compound → sub-tasks    │
+                         └───────────────────┬──────────────────┘
+                                             ▼
+                         ┌──────────────────────────────────────┐
+                         │   Gate · score each sub-task → expert │
+                         │   (heuristic + image hard-route)      │
+                         └───────────────────┬──────────────────┘
+                                             ▼  (run in parallel)
+            ┌──────────────┬─────────────────┼─────────────────┐
+            ▼              ▼                 ▼                 ▼
+      ┌──────────┐  ┌────────────┐   ┌──────────────┐   ┌──────────┐
+      │ Llama 3.2│  │ Mistral 7B │   │ DeepSeek R1  │   │  LLaVA   │
+      │  (fast)  │  │ (general)  │   │ (reasoning)  │   │ (vision) │
+      └────┬─────┘  └─────┬──────┘   └──────┬───────┘   └────┬─────┘
+           └──────────────┴────────┬────────┴────────────────┘
+                                   ▼
+                         ┌──────────────────────────────────────┐
+                         │   Synthesis / combiner (Mistral 7B)   │
+                         │   fuse sub-answers → unified reply     │
+                         └───────────────────┬──────────────────┘
+                                             ▼
+                              Unified answer  +  per-sub-task trace
+```
+
 ## Routing logic
+
+### Single-route classifier
 
 The classifier produces a **complexity** score and a **privacy** score, each in
 `[0, 1]`. The router then applies this policy:
@@ -80,16 +134,69 @@ code-related terms, and clause count. **Privacy** accumulates weighted evidence
 from structured PII (phone numbers, emails, SSN-like patterns, full names) and
 sensitive vocabulary (financial, health, address terms).
 
+### Tiered gate (decompose → score → run → synthesize)
+
+1. **Decompose** (`gate.decompose`, Llama 3.2). The query is split into at most
+   four sub-tasks. Llama 3.2 is prompted with Ollama **structured outputs** (a
+   JSON-array schema) at `temperature 0`, so the gate's output is deterministic
+   and always parseable — a free-text prompt to a 3B model is not. Trivially
+   simple queries skip the model call entirely; an unparseable result degrades
+   gracefully to a single sub-task. **Recursive decomposition:** a sub-task that
+   still reads as a compound request (joined by `and` / `also` / `then` /
+   `as well as`) is decomposed one level deeper, bounded by a depth cap
+   (`MAX_DEPTH`) and a leaf cap (`MAX_LEAVES`) so it always terminates. An
+   analytical ask like *"compare X to Y"* is deliberately kept whole rather than
+   atomised.
+
+2. **Score** (`gate.gate_score`). Each sub-task is routed to exactly one expert:
+
+   | Condition                                       | Expert           |
+   | ----------------------------------------------- | ---------------- |
+   | depends on an image (**hard rule**)             | `llava`          |
+   | effective complexity `≥ 0.6`                    | `deepseek-r1:7b` |
+   | privacy `> 0.6` and complexity `< 0.6`          | `mistral`        |
+   | complexity `< 0.3`                              | `llama3.2`       |
+   | otherwise                                       | `mistral`        |
+
+   A comparison/analysis verb (`compare`, `analyze`, `evaluate`, `contrast`,
+   `tradeoff`, …) adds a fixed `+0.30` boost to complexity *before* thresholding,
+   because isolating a short analytical clause otherwise under-scores it on the
+   length-weighted heuristic. The boost is shown in the reasoning string.
+
+3. **Run in parallel** (`router.route_decomposed`). The selected experts execute
+   concurrently on a bounded thread pool — the blocking Ollama calls overlap
+   their network waits — while results keep sub-task order. **Sparse
+   activation:** only the chosen experts run, never all four.
+
+4. **Synthesize** (`router._synthesize`, Mistral 7B). When more than one
+   sub-task was answered, the combiner fuses the individual answers into one
+   coherent reply to the original request. With a single sub-task the lone
+   answer is returned as-is and no synthesis runs.
+
+## API
+
+| Method & path        | Purpose                                                                     |
+| -------------------- | --------------------------------------------------------------------------- |
+| `POST /query`        | Single-route: classify and dispatch to one model. Returns the full decision. |
+| `POST /query/decomposed` | Tiered flow: decompose, gate, run in parallel, synthesize. Optional `image_base64`. |
+| `GET  /history`      | The 50 most recent single-route decisions, newest first.                    |
+| `GET  /stats`        | Aggregate statistics across retained single-route decisions.                |
+| `GET  /health`       | Service health + live Ollama reachability + which of the four models are present. |
+
+Interactive docs are served at `/docs`.
+
 ## Setup & run
 
 ### Prerequisites
 
 - [Ollama](https://ollama.com) installed and serving on `http://localhost:11434`
-- The two models pulled:
+- The four models pulled:
 
   ```bash
+  ollama pull llama3.2
   ollama pull mistral
   ollama pull deepseek-r1:7b
+  ollama pull llava
   ```
 
 - Python 3.12+ and Node.js 18+
@@ -113,39 +220,50 @@ npm install
 npm run dev
 ```
 
-The dashboard is now at `http://localhost:5173`.
+The dashboard is now at `http://localhost:5173`. Toggle **Decompose (MoE)** next
+to the Submit button to run the tiered flow and see the per-sub-task trace plus
+the synthesized answer.
 
 ## Technical decisions
 
-- **Rule-based classifier instead of an ML classifier.** The routing signals
-  (length, keyword cues, PII patterns) are cheap to compute and, crucially,
-  *fully explainable* — every decision carries a human-readable reason. A trained
-  classifier would add latency, a training-data requirement, and an opaque
-  decision surface for marginal benefit at this scale. The rule-based core is
-  also the right baseline to benchmark a future ML model against.
+- **Rule-based classifier and gate instead of learned ones.** The routing
+  signals (length, keyword cues, PII patterns) are cheap to compute and,
+  crucially, *fully explainable* — every decision carries a human-readable
+  reason. A trained gate would add latency, a training-data requirement, and an
+  opaque decision surface for marginal benefit at this scale. The rule-based
+  core is also the right baseline to benchmark a future learned gate against.
+- **Structured outputs for decomposition.** A 3B model emitting free-text JSON
+  is flaky; constraining Llama 3.2 with an Ollama JSON-array schema at
+  `temperature 0` makes the gate deterministic and always parseable, with a
+  graceful single-sub-task fallback if anything still goes wrong.
+- **Parallel experts over a thread pool.** The expert calls are blocking HTTP to
+  Ollama, so a thread pool overlaps their network waits with no async rewrite;
+  concurrency is capped so we never ask Ollama for more simultaneous generations
+  than it can usefully serve.
 - **Fully local, no external APIs.** Privacy (no data leaves the machine),
   latency (no network round-trip), cost (no per-token billing), and offline
   capability all follow directly. It also makes the project trivially
-  reproducible — clone, pull two models, run.
+  reproducible — clone, pull the models, run.
 - **FastAPI + Vite/React instead of a monolith.** A clean HTTP boundary lets the
   routing logic be tested and reused independently of any UI, gives us free
   interactive API docs via FastAPI, and lets the React dashboard iterate with
-  hot-reload. Separation of concerns over a single templated server.
+  hot-reload.
 - **In-memory logging instead of a database.** Routing history is ephemeral
   demo/observability data, not a system of record. An in-memory ring buffer
-  keeps the project dependency-free, makes stats computation a simple list
-  comprehension, and starts instantly with nothing to migrate or clean up.
+  keeps the project dependency-free and starts instantly with nothing to migrate.
+  Single-route and decomposed sub-task decisions are kept in separate buffers so
+  their differing shapes never perturb the existing `/stats` and `/history`.
 
 ## What I'd build next
 
 - **Streaming responses via SSE** so tokens render as they're generated instead
   of waiting for the full completion.
-- **A fine-tuned complexity classifier** trained on real query/route data, with
-  the current rule-based router as both the baseline and the labeller.
+- **Unified history/stats across both flows** so decomposed sub-tasks appear in
+  the live feed and aggregate metrics alongside single-route decisions.
+- **A learned gate** trained on real query/route data, with the current
+  rule-based gate as both the baseline and the labeller.
 - **Persistent SQLite logging with export** for longitudinal analysis of routing
   quality and compute savings.
-- **Support for additional Ollama models** (DeepSeek R1 is in; next Phi-3 and
-  others) with a routing policy that picks among more than two tiers.
 - **Automatic model benchmarking on startup** to measure each model's real
   latency profile and calibrate the compute-saved baseline dynamically.
 
@@ -154,13 +272,16 @@ The dashboard is now at `http://localhost:5173`.
 ```
 localmind/
 ├── backend/
-│   ├── main.py            # FastAPI app: /query /history /stats /health
-│   ├── router.py          # classify → route → call model → log
-│   ├── classifier.py      # complexity & privacy scoring + routing policy
+│   ├── main.py            # FastAPI app: /query /query/decomposed /history /stats /health
+│   ├── router.py          # single-route + decomposed (decompose→gate→parallel→synthesize)
+│   ├── gate.py            # MoE-inspired gate: decompose (recursive) + per-sub-task scoring
+│   ├── classifier.py      # complexity & privacy scoring + single-route policy
 │   ├── models/
-│   │   ├── mistral_client.py
-│   │   └── deepseek_client.py
-│   ├── logger.py          # in-memory decision log + stats
+│   │   ├── llama32_client.py   # fast expert + decomposition gate (structured outputs)
+│   │   ├── mistral_client.py   # general expert + synthesis
+│   │   ├── deepseek_client.py  # reasoning expert
+│   │   └── llava_client.py     # vision expert (multimodal)
+│   ├── logger.py          # in-memory decision log + stats (+ separate sub-task buffer)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -168,8 +289,9 @@ localmind/
 │   │   ├── App.jsx
 │   │   ├── api.js
 │   │   ├── components/
-│   │   │   ├── QueryInput.jsx
-│   │   │   ├── ResponsePanel.jsx
+│   │   │   ├── QueryInput.jsx        # query box + Decompose (MoE) toggle
+│   │   │   ├── ResponsePanel.jsx     # single-route result
+│   │   │   ├── DecomposedPanel.jsx   # sub-task trace + synthesized answer
 │   │   │   ├── LiveFeed.jsx
 │   │   │   └── StatsBar.jsx
 │   │   └── main.jsx

@@ -32,14 +32,61 @@ from logger import decision_log  # noqa: E402
 # IPv4 loopback by default — see note in the model clients about IPv6 stalls.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
-# Models LocalMind depends on, by their Ollama tag.
-REQUIRED_MODELS = ("mistral", "deepseek-r1:7b")
+# Models LocalMind depends on, by their Ollama tag. The tiered MoE-inspired
+# system uses all four: Llama 3.2 (fast expert + gate), Mistral (general),
+# DeepSeek R1 (reasoning), and LLaVA (vision).
+REQUIRED_MODELS = ("llama3.2", "mistral", "deepseek-r1:7b", "llava")
 
 
 class QueryRequest(BaseModel):
     """Request body for ``POST /query``."""
 
     query: str = Field(..., min_length=1, description="The user query to route.")
+
+
+class DecomposedQueryRequest(BaseModel):
+    """Request body for ``POST /query/decomposed``."""
+
+    query: str = Field(..., min_length=1, description="The user query to decompose and route.")
+    image_base64: str | None = Field(
+        default=None,
+        description="Optional base64-encoded image; sub-tasks needing it hard-route to LLaVA.",
+    )
+
+
+class SubtaskDecision(BaseModel):
+    """One sub-task's expert assignment and result within a decomposed query."""
+
+    subtask: str
+    expert: str = Field(..., description="Assigned expert model tag.")
+    complexity: float
+    privacy: float
+    reasoning: str
+    hard_routed: bool = Field(..., description="True only when hard-routed to LLaVA for an image.")
+    response: str
+    latency_ms: int
+    depth: int = Field(..., description="Recursion depth; 0 for top-level sub-tasks, 1+ for nested ones.")
+
+
+class SynthesisResult(BaseModel):
+    """The combiner step's unified answer over all sub-task responses."""
+
+    response: str
+    model: str = Field(..., description="Model that produced the synthesis.")
+    latency_ms: int
+
+
+class DecomposedResponse(BaseModel):
+    """Response returned by ``POST /query/decomposed``."""
+
+    query: str
+    decomposed: bool = Field(..., description="False if the query was a single, non-decomposed sub-task.")
+    subtasks: list[SubtaskDecision]
+    synthesis: SynthesisResult | None = Field(
+        default=None,
+        description="Unified answer fusing all sub-task responses; null when fewer than two sub-tasks were answered.",
+    )
+    timestamp: str
 
 
 class RouterResponse(BaseModel):
@@ -100,6 +147,19 @@ app.add_middleware(
 def post_query(request: QueryRequest) -> dict:
     """Classify and route a query, returning the full routing decision."""
     return router_module.handle_query(request.query)
+
+
+@app.post("/query/decomposed", response_model=DecomposedResponse)
+def post_query_decomposed(request: DecomposedQueryRequest) -> dict:
+    """Decompose a query into sub-tasks and route each to its expert.
+
+    Runs the full tiered, Mixture-of-Experts-inspired flow: the gate splits the
+    query into sub-tasks (recursively where a sub-task is itself compound),
+    scores each to one expert, executes the selected experts in parallel, and
+    synthesizes their answers into one unified response. Simple queries return a
+    single, non-decomposed sub-task and no synthesis.
+    """
+    return router_module.route_decomposed(request.query, request.image_base64)
 
 
 @app.get("/history", response_model=list[RouterResponse])

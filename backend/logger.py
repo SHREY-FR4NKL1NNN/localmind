@@ -22,12 +22,33 @@ class DecisionLog:
     def __init__(self, max_entries: int = MAX_ENTRIES) -> None:
         """Create a decision log holding at most ``max_entries`` decisions."""
         self._entries: deque[dict] = deque(maxlen=max_entries)
+        # Sub-task decisions from the decomposed (MoE) flow are kept in a
+        # separate buffer so the existing single-route /history and /stats
+        # endpoints are completely unaffected by their differing shape.
+        # Unified reporting across both is a later upgrade.
+        self._subtask_entries: deque[dict] = deque(maxlen=max_entries)
         self._lock = Lock()
 
     def log(self, decision: dict) -> None:
-        """Append a routing decision, evicting the oldest if the log is full."""
+        """Append a single-route routing decision, evicting oldest if full."""
         with self._lock:
             self._entries.append(dict(decision))
+
+    def log_subtask(self, decision: dict) -> None:
+        """Append a decomposed-query sub-task decision to the sub-task buffer.
+
+        Stored separately from single-route decisions so it cannot perturb the
+        existing /stats and /history results. Accepts the per-sub-task decision
+        dict produced by ``router.route_decomposed``.
+        """
+        with self._lock:
+            self._subtask_entries.append(dict(decision))
+
+    def get_subtask_history(self, n: int = 50) -> list[dict]:
+        """Return the most recent ``n`` sub-task decisions, newest first."""
+        with self._lock:
+            items = list(self._subtask_entries)
+        return list(reversed(items[-n:]))
 
     def get_history(self, n: int = 50) -> list[dict]:
         """Return the most recent ``n`` decisions, newest first."""
