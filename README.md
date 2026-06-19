@@ -167,27 +167,32 @@ sensitive vocabulary (financial, health, address terms).
    length-weighted heuristic. The boost is shown in the reasoning string.
 
 3. **Run in parallel** (`router.route_decomposed`). The selected experts execute
-   concurrently on a bounded thread pool — the blocking Ollama calls overlap
-   their network waits — while results keep sub-task order. **Sparse
-   activation:** only the chosen experts run, never all four. The concurrency cap
-   (`MAX_PARALLEL_EXPERTS`) is deliberately conservative: on a memory-constrained
-   GPU the experts are different models that don't all fit in VRAM at once, so
-   Ollama serialises them by swapping; a high cap just deepens that queue and
-   pushes the slowest queued call past its client timeout.
+   concurrently via `asyncio.gather` over `httpx.AsyncClient` coroutines — the
+   awaited Ollama calls overlap on the event loop — while results keep sub-task
+   order (`return_exceptions=True`, so one failing expert never cancels the
+   rest). **Sparse activation:** only the chosen experts run, never all four; the
+   response's `sparsity` block reports how few were activated. Generous per-client
+   timeouts absorb the model-swap queueing a memory-constrained GPU imposes when
+   the distinct experts don't all fit in VRAM at once. The whole batch's
+   wall-clock is returned as `total_latency_ms` — close to the *slowest* expert,
+   not the sum, which is what proves the calls actually ran in parallel.
 
-4. **Synthesize** (`router._synthesize`, Mistral 7B). When more than one
-   sub-task was answered, the combiner fuses the individual answers into one
-   coherent reply to the original request. With a single sub-task the lone
-   answer is returned as-is and no synthesis runs.
+4. **Combine** (`combiner.combine`, Llama 3.2). When more than one sub-task was
+   answered, the combiner fuses the individual answers into one coherent reply to
+   the original request. With a single sub-task the lone answer is returned as-is
+   and the combiner is skipped (`combiner_skipped: true`). This is a **text
+   synthesis** step, *not* a literal MoE weighted-sum — see the note in
+   `combiner.py`.
 
 ## API
 
 | Method & path        | Purpose                                                                     |
 | -------------------- | --------------------------------------------------------------------------- |
 | `POST /query`        | Single-route: classify and dispatch to one model. Returns the full decision. |
-| `POST /query/decomposed` | Tiered flow: decompose, gate, run in parallel, synthesize. Optional `image_base64`. |
+| `POST /query/decomposed` | Tiered flow: decompose, gate, run in parallel (`asyncio.gather`), combine. Returns per-sub-task trace, `sparsity`, and `total_latency_ms`. Optional `image_base64`. |
 | `GET  /history`      | The 50 most recent single-route decisions, newest first.                    |
 | `GET  /stats`        | Aggregate statistics across retained single-route decisions.                |
+| `GET  /expert-stats` | Lifetime per-expert activation counts and each expert's share of all activations. |
 | `GET  /health`       | Service health + live Ollama reachability + which of the four models are present. |
 
 Interactive docs are served at `/docs`.
@@ -243,10 +248,14 @@ the synthesized answer.
   is flaky; constraining Llama 3.2 with an Ollama JSON-array schema at
   `temperature 0` makes the gate deterministic and always parseable, with a
   graceful single-sub-task fallback if anything still goes wrong.
-- **Parallel experts over a thread pool.** The expert calls are blocking HTTP to
-  Ollama, so a thread pool overlaps their network waits with no async rewrite;
-  concurrency is capped so we never ask Ollama for more simultaneous generations
-  than it can usefully serve.
+- **Parallel experts via `asyncio` + `httpx`.** Every model client is an
+  `async def` over `httpx.AsyncClient`, and `route_decomposed` fans the chosen
+  experts out with `asyncio.gather(..., return_exceptions=True)`. The awaited
+  Ollama calls overlap on a single event loop — no thread pool — so the batch's
+  wall-clock tracks the slowest expert rather than the sum, and one failing
+  expert cannot cancel the others. Generous per-client timeouts absorb the
+  server-side queueing Ollama does when the distinct experts don't co-reside in
+  VRAM.
 - **Fully local, no external APIs.** Privacy (no data leaves the machine),
   latency (no network round-trip), cost (no per-token billing), and offline
   capability all follow directly. It also makes the project trivially
@@ -260,6 +269,26 @@ the synthesized answer.
   keeps the project dependency-free and starts instantly with nothing to migrate.
   Single-route and decomposed sub-task decisions are kept in separate buffers so
   their differing shapes never perturb the existing `/stats` and `/history`.
+
+## Scope expansion
+
+The original brief was a **Mixture-of-Experts-inspired routing layer**: decompose
+a query, gate each sub-task to one expert, run the experts in parallel, and
+combine their answers. That core is implemented faithfully. Two pieces of this
+project were built **beyond** that core spec as deliberate extensions, and are
+called out here so the boundary is explicit:
+
+- **Recursive decomposition** (`gate.decompose`, bounded by `MAX_DEPTH` /
+  `MAX_LEAVES`). The core spec only required a single decomposition pass. Splitting
+  a still-compound sub-task one level deeper is an enhancement to decomposition
+  quality, not part of the original routing design.
+- **The React dashboard** (`frontend/`). The core deliverable is the routing
+  backend and its HTTP API; the Vite/React UI — live feed, stats bar, per-sub-task
+  trace, and the **Decompose (MoE)** toggle — is an extension built to make the
+  routing behaviour visible and demoable.
+
+Both are intentional additions that go past the baseline; neither is required for
+the core decompose → gate → parallel → combine flow to function.
 
 ## What I'd build next
 
@@ -279,16 +308,17 @@ the synthesized answer.
 ```
 localmind/
 ├── backend/
-│   ├── main.py            # FastAPI app: /query /query/decomposed /history /stats /health
-│   ├── router.py          # single-route + decomposed (decompose→gate→parallel→synthesize)
+│   ├── main.py            # FastAPI app: /query /query/decomposed /history /stats /expert-stats /health
+│   ├── router.py          # single-route + decomposed (decompose→gate→asyncio.gather→combine)
 │   ├── gate.py            # MoE-inspired gate: decompose (recursive) + per-sub-task scoring
+│   ├── combiner.py        # async text-synthesis combiner (Llama 3.2); not a literal MoE weighted-sum
 │   ├── classifier.py      # complexity & privacy scoring + single-route policy
-│   ├── models/
-│   │   ├── llama32_client.py   # fast expert + decomposition gate (structured outputs)
-│   │   ├── mistral_client.py   # general expert + synthesis
+│   ├── models/                # all async httpx.AsyncClient clients
+│   │   ├── llama32_client.py   # fast expert + decomposition gate (structured outputs) + combiner
+│   │   ├── mistral_client.py   # general expert
 │   │   ├── deepseek_client.py  # reasoning expert
 │   │   └── llava_client.py     # vision expert (multimodal)
-│   ├── logger.py          # in-memory decision log + stats (+ separate sub-task buffer)
+│   ├── logger.py          # in-memory decision log + stats + expert-activation tally
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/

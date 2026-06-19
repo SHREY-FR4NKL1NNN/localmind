@@ -1,4 +1,4 @@
-"""Client for the Llama 3.2 model served locally by Ollama.
+"""Async client for the Llama 3.2 model served locally by Ollama.
 
 Llama 3.2 plays two roles in LocalMind's tiered, Mixture-of-Experts-inspired
 design: it is the fast/trivial *expert* for the simplest sub-tasks, and it is
@@ -7,6 +7,9 @@ decompose an incoming query into sub-tasks. It is the smallest and fastest of
 the four models, hence the short timeout. Like the other clients, this never
 raises — connection problems and timeouts are caught and returned as a
 structured error dict so the router/gate stay resilient.
+
+HTTP is performed with ``httpx.AsyncClient`` so the decomposed flow can run
+several experts concurrently with ``asyncio.gather`` (see ``router.py``).
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import os
 import time
 
-import requests
+import httpx
 
 # Default to the IPv4 loopback explicitly: on Windows, "localhost" can resolve
 # to IPv6 (::1) first and stall for seconds before falling back to IPv4, while
@@ -33,7 +36,7 @@ DISPLAY_NAME = "Llama 3.2"
 TIMEOUT_SECONDS = 45
 
 
-def generate(
+async def generate(
     prompt: str,
     options: dict | None = None,
     response_format: dict | str | None = None,
@@ -41,9 +44,10 @@ def generate(
     """Generate a completion from Llama 3.2 via Ollama.
 
     Sends a non-streaming request to the local Ollama ``/api/generate``
-    endpoint. On success returns ``{"response", "latency_ms", "model"}``. On
-    any connection error or timeout returns the same shape with an additional
-    ``error`` key and an empty ``response`` — this function never raises.
+    endpoint using ``httpx.AsyncClient``. On success returns
+    ``{"response", "latency_ms", "model"}``. On any connection error or timeout
+    returns the same shape with an additional ``error`` key and an empty
+    ``response`` — this coroutine never raises.
 
     Two optional knobs support the gate's structured-decomposition use:
     ``options`` is forwarded as Ollama generation options (e.g.
@@ -60,16 +64,17 @@ def generate(
 
     start = time.perf_counter()
     try:
-        resp = requests.post(GENERATE_URL, json=payload, timeout=TIMEOUT_SECONDS)
-        resp.raise_for_status()
-        data = resp.json()
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+            resp = await client.post(GENERATE_URL, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
         latency_ms = int((time.perf_counter() - start) * 1000)
         return {
             "response": (data.get("response") or "").strip(),
             "latency_ms": latency_ms,
             "model": MODEL_NAME,
         }
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         latency_ms = int((time.perf_counter() - start) * 1000)
         return {
             "response": "",
@@ -77,7 +82,7 @@ def generate(
             "model": MODEL_NAME,
             "error": f"{DISPLAY_NAME} request timed out after {TIMEOUT_SECONDS}s.",
         }
-    except requests.exceptions.RequestException as exc:
+    except httpx.HTTPError as exc:
         latency_ms = int((time.perf_counter() - start) * 1000)
         return {
             "response": "",

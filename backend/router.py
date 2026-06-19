@@ -4,33 +4,40 @@ Ties the pieces together for a single query. Two flows live here:
 
 * ``handle_query`` — the original single-route flow: classify a query, dispatch
   it to one chosen model, estimate compute saved, log the decision, and return a
-  unified response dict. Left untouched for backward compatibility.
+  unified response dict. Left behaviourally unchanged (now ``async`` because the
+  model clients are async).
 * ``route_decomposed`` — the tiered, Mixture-of-Experts-inspired flow: ask the
   gate to decompose the query into sub-tasks (recursively, where a sub-task is
   itself compound), score each sub-task to an expert, run the selected experts
-  **in parallel**, and finally **synthesize** the per-sub-task answers into one
-  unified response.
+  **concurrently** with ``asyncio.gather``, and finally **combine** the
+  per-sub-task answers (see ``combiner.py``) into one unified response.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from statistics import mean
 
+import combiner
 import gate
 from classifier import classify
 from logger import decision_log
 from models import deepseek_client, llama32_client, llava_client, mistral_client
 
-# Maps a gate-assigned expert name to the client callable that serves it. Only
+# Maps a gate-assigned expert name to the client coroutine that serves it. Only
 # the LLaVA client takes an image, so it is dispatched separately below.
 _TEXT_EXPERT_CLIENTS = {
     "llama3.2": llama32_client.generate,
     "mistral": mistral_client.generate,
     "deepseek-r1:7b": deepseek_client.generate,
 }
+
+# Total number of distinct experts in the tiered system. Used to compute the
+# sparsity ratio (how few of the available experts a given query activates).
+EXPERTS_AVAILABLE = 4
 
 # Default baseline used before any DeepSeek R1 latency has been observed. The
 # compute-saved metric compares a Mistral run against what DeepSeek R1 would
@@ -39,23 +46,6 @@ DEFAULT_DEEPSEEK_LATENCY_MS = 8000
 
 # Rolling window of recent DeepSeek R1 latencies used to refine the baseline.
 _recent_deepseek_latencies: deque[int] = deque(maxlen=20)
-
-# Upper bound on concurrent expert calls in the decomposed flow. The model
-# clients are blocking I/O (HTTP to Ollama), so threads overlap their network
-# waits well. The cap keeps us from hammering Ollama with more simultaneous
-# generations than it can usefully serve. It is deliberately conservative: on a
-# memory-constrained GPU the experts are *different* models that do not all fit
-# in VRAM at once, so Ollama serialises them by swapping models in and out.
-# Issuing many concurrent calls then just deepens that queue and pushes the
-# slowest queued call past its client timeout (observed live), without buying
-# real parallelism. A small cap keeps the queue shallow while still overlapping
-# the cases that genuinely can run together.
-MAX_PARALLEL_EXPERTS = 2
-
-# The synthesis/combiner step is served by Mistral: the general-purpose expert
-# is a good fit for fusing several short answers into one coherent reply without
-# the latency of the reasoning model.
-SYNTHESIS_MODEL = "mistral"
 
 
 def _baseline_latency_ms() -> int:
@@ -69,7 +59,7 @@ def _baseline_latency_ms() -> int:
     return DEFAULT_DEEPSEEK_LATENCY_MS
 
 
-def handle_query(query: str) -> dict:
+async def handle_query(query: str) -> dict:
     """Classify, route, execute, and log a single query.
 
     Returns the unified router response dict containing the model output, the
@@ -81,9 +71,9 @@ def handle_query(query: str) -> dict:
     route = classification["route"]
 
     if route == "mistral":
-        result = mistral_client.generate(query)
+        result = await mistral_client.generate(query)
     else:
-        result = deepseek_client.generate(query)
+        result = await deepseek_client.generate(query)
 
     latency_ms = int(result.get("latency_ms", 0))
     failed = "error" in result
@@ -117,16 +107,16 @@ def handle_query(query: str) -> dict:
     return decision
 
 
-def _run_expert(expert: str, subtask: str, image_base64: str | None) -> dict:
+async def _run_expert(expert: str, subtask: str, image_base64: str | None) -> dict:
     """Execute one expert on one sub-task, returning ``{response, latency_ms}``.
 
-    Dispatches to the client for ``expert`` (the vision expert additionally
-    receives ``image_base64``). The underlying clients never raise; if a call
-    returns an error it is surfaced as a clear string in ``response`` so a single
-    failing sub-task cannot crash the whole decomposed query.
+    Dispatches to the client coroutine for ``expert`` (the vision expert
+    additionally receives ``image_base64``). The underlying clients never raise;
+    if a call returns an error it is surfaced as a clear string in ``response``
+    so a single failing sub-task cannot crash the whole decomposed query.
     """
     if expert == "llava":
-        result = llava_client.generate(subtask, image_base64)
+        result = await llava_client.generate(subtask, image_base64)
     else:
         client = _TEXT_EXPERT_CLIENTS.get(expert)
         if client is None:
@@ -134,57 +124,15 @@ def _run_expert(expert: str, subtask: str, image_base64: str | None) -> dict:
                 "response": f"[error] No client registered for expert '{expert}'.",
                 "latency_ms": 0,
             }
-        result = client(subtask)
+        result = await client(subtask)
 
     if "error" in result:
         return {"response": f"[error] {result['error']}", "latency_ms": result.get("latency_ms", 0)}
     return {"response": result.get("response", ""), "latency_ms": int(result.get("latency_ms", 0))}
 
 
-def _synthesize(query: str, subtask_results: list[dict]) -> dict | None:
-    """Combine per-sub-task answers into one unified response via Mistral.
-
-    The combiner step in the MoE-inspired flow: it fuses the individual expert
-    answers into a single coherent reply to the user's original request, without
-    referring to the sub-tasks or experts. Returns ``{"response", "model",
-    "latency_ms"}`` (the ``response`` carries an ``[error]`` prefix if the
-    synthesis call itself failed), or ``None`` when synthesis is not warranted —
-    i.e. there are fewer than two successfully-answered sub-tasks, in which case
-    the lone answer already is the response and combining would add nothing.
-    """
-    usable = [r for r in subtask_results if not r["response"].startswith("[error]")]
-    if len(usable) < 2:
-        return None
-
-    answers = "\n\n".join(
-        f"Sub-task {i}: {r['subtask']}\nAnswer: {r['response']}"
-        for i, r in enumerate(usable, start=1)
-    )
-    prompt = (
-        "Several sub-tasks of a single user request were answered separately "
-        "below. Combine them into ONE coherent, well-organised reply to the "
-        "original request. Do not mention that the work was split up, and do "
-        "not refer to 'sub-tasks' or which model produced what — just give the "
-        "unified answer.\n\n"
-        f"Original request: {query}\n\n{answers}\n\nUnified answer:"
-    )
-    result = mistral_client.generate(prompt)
-    latency_ms = int(result.get("latency_ms", 0))
-    if "error" in result:
-        return {
-            "response": f"[error] {result['error']}",
-            "model": SYNTHESIS_MODEL,
-            "latency_ms": latency_ms,
-        }
-    return {
-        "response": result.get("response", ""),
-        "model": SYNTHESIS_MODEL,
-        "latency_ms": latency_ms,
-    }
-
-
-def route_decomposed(query: str, image_base64: str | None) -> dict:
-    """Decompose a query, gate each sub-task to an expert, run them, synthesize.
+async def route_decomposed(query: str, image_base64: str | None) -> dict:
+    """Decompose a query, gate each sub-task to an expert, run them, combine.
 
     Implements the full tiered, MoE-inspired flow:
 
@@ -192,20 +140,21 @@ def route_decomposed(query: str, image_base64: str | None) -> dict:
        where a sub-task is itself compound).
     2. **Gate** — each sub-task is scored to exactly one expert (sparse
        activation: only the chosen experts run).
-    3. **Execute in parallel** — the selected experts run concurrently on a
-       thread pool (bounded by ``MAX_PARALLEL_EXPERTS``), overlapping their
-       Ollama network waits; result order matches the sub-task order.
-    4. **Synthesize** — when more than one sub-task was answered, a combiner
-       step fuses the answers into one unified response.
+    3. **Execute concurrently** — the selected experts run together via
+       ``asyncio.gather`` (``return_exceptions=True`` so one failing expert never
+       cancels the others); result order matches the sub-task order.
+    4. **Combine** — ``combiner.combine`` fuses the answers into one unified
+       response (skipped when there is only one sub-task).
 
     Each sub-task's routing decision is logged. Returns a dict with the original
-    query, whether decomposition actually happened, a per-sub-task list of
-    ``{subtask, expert, complexity, privacy, reasoning, hard_routed, response,
-    latency_ms, depth}``, the ``synthesis`` result (or ``None``), and a
-    timestamp.
+    query, whether decomposition happened, the per-sub-task list, the legacy
+    ``synthesis`` object (for the dashboard), the combiner fields
+    (``combined_response``/``combiner_skipped``/``combiner_latency_ms``), the
+    ``sparsity`` metric, the wall-clock ``total_latency_ms`` for the parallel
+    batch plus combiner, and a timestamp.
     """
     has_image = image_base64 is not None
-    sub_tasks = gate.decompose(query, has_image)
+    sub_tasks = await gate.decompose(query, has_image)
 
     # "Decomposed" is False only when the gate produced a single sub-task that is
     # just the original query (the simple/fallback path).
@@ -216,18 +165,33 @@ def route_decomposed(query: str, image_base64: str | None) -> dict:
 
     # Score every sub-task first (cheap, pure-CPU heuristic), then dispatch the
     # expert calls concurrently. gate_score is deterministic and order-stable, so
-    # zipping the futures back to the scores preserves sub-task order.
+    # zipping the gathered results back to the scores preserves sub-task order.
     scores = [
         gate.gate_score(st["subtask"], st["depends_on_image"]) for st in sub_tasks
     ]
-    with ThreadPoolExecutor(
-        max_workers=min(MAX_PARALLEL_EXPERTS, len(sub_tasks))
-    ) as pool:
-        futures = [
-            pool.submit(_run_expert, score["expert"], st["subtask"], image_base64)
+
+    # Wall-clock timing starts here: it spans the whole parallel expert batch
+    # plus the combiner, so total_latency_ms reflects what the caller actually
+    # waited. With true parallelism it tracks the SLOWEST expert (+ combiner),
+    # not the sum of the experts.
+    batch_start = time.perf_counter()
+    gathered = await asyncio.gather(
+        *(
+            _run_expert(score["expert"], st["subtask"], image_base64)
             for st, score in zip(sub_tasks, scores)
-        ]
-        executions = [f.result() for f in futures]
+        ),
+        return_exceptions=True,
+    )
+    # return_exceptions=True means a crashing coroutine yields an Exception
+    # object instead of propagating; normalise those into error results so one
+    # bad expert cannot break the response. (The clients never raise, so this is
+    # belt-and-suspenders.)
+    executions = [
+        ex
+        if not isinstance(ex, BaseException)
+        else {"response": f"[error] expert crashed: {ex}", "latency_ms": 0}
+        for ex in gathered
+    ]
 
     subtask_results: list[dict] = []
     for sub_task, score, execution in zip(sub_tasks, scores, executions):
@@ -245,12 +209,40 @@ def route_decomposed(query: str, image_base64: str | None) -> dict:
         subtask_results.append(entry)
         decision_log.log_subtask({"query": query, "timestamp": timestamp, **entry})
 
-    synthesis = _synthesize(query, subtask_results) if decomposed else None
+    combiner_result = await combiner.combine(query, subtask_results)
+    total_latency_ms = int((time.perf_counter() - batch_start) * 1000)
+
+    # Sparsity: how few of the available experts this query actually activated.
+    activated = sorted({entry["expert"] for entry in subtask_results})
+    sparsity = {
+        "experts_activated": len(activated),
+        "experts_available": EXPERTS_AVAILABLE,
+        "sparsity_ratio": round(len(activated) / EXPERTS_AVAILABLE, 3),
+        "vision_activated": "llava" in activated,
+        "activated_expert_names": activated,
+    }
+
+    # Legacy dashboard shape: DecomposedPanel renders `synthesis` when present.
+    # It is None whenever the combiner was skipped.
+    synthesis = (
+        None
+        if combiner_result["skipped"]
+        else {
+            "response": combiner_result["combined_response"],
+            "model": combiner_result["combiner_model"],
+            "latency_ms": combiner_result["combiner_latency_ms"],
+        }
+    )
 
     return {
         "query": query,
         "decomposed": decomposed,
         "subtasks": subtask_results,
         "synthesis": synthesis,
+        "combined_response": combiner_result["combined_response"],
+        "combiner_skipped": combiner_result["skipped"],
+        "combiner_latency_ms": combiner_result["combiner_latency_ms"],
+        "sparsity": sparsity,
+        "total_latency_ms": total_latency_ms,
         "timestamp": timestamp,
     }

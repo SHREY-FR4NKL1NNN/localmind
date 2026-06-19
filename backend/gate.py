@@ -83,6 +83,14 @@ PRIVACY_THRESHOLD = 0.6
 ANALYSIS_VERBS = ("compare", "analyze", "analyse", "evaluate", "contrast", "tradeoff", "trade-off")
 ANALYSIS_BOOST = 0.3
 
+# Cues that a query carries a *second, distinct* ask alongside an analytical one
+# ("Compare X to Y, and also tell me what 7x8 is"). When present, an
+# analysis-verb query is NOT kept whole — it genuinely contains independent asks
+# that should fan out to different experts, so it is allowed to decompose. This
+# is what distinguishes a single analytical sentence (kept whole) from a
+# multi-ask query that merely happens to include an analytical part.
+EXTRA_ASK_CUES = ("also", "as well as", "additionally", "separately", "plus")
+
 
 def _is_simple(query: str) -> bool:
     """Return True if a query is short and shows no multi-step cue words.
@@ -126,6 +134,19 @@ def _has_analysis_verb(text: str) -> bool:
     """
     lowered = text.lower()
     return any(verb in lowered for verb in ANALYSIS_VERBS)
+
+
+def _has_extra_ask_cue(text: str) -> bool:
+    """Return True if the text signals a second, distinct ask (see EXTRA_ASK_CUES).
+
+    Used to tell a single analytical sentence ("compare X to Y and evaluate the
+    tradeoffs" — kept whole) apart from a multi-ask query that merely includes an
+    analytical part ("compare X to Y, and also tell me what 7x8 is" — decomposed).
+    """
+    lowered = text.lower()
+    return any(
+        re.search(rf"\b{re.escape(cue)}\b", lowered) for cue in EXTRA_ASK_CUES
+    )
 
 
 def _decomposition_prompt(query: str, has_image: bool) -> str:
@@ -195,7 +216,7 @@ def _extract_subtasks(raw: str) -> list[dict] | None:
     return subtasks
 
 
-def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
+async def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
     """Decompose a query into a list of sub-tasks via the Llama 3.2 gate.
 
     Returns a list of ``{"subtask": str, "depends_on_image": bool, "depth": int}``
@@ -211,15 +232,16 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
     * When ``has_image`` is True, at least one returned sub-task is guaranteed to
       carry ``depends_on_image=True`` — if the model produced none, an explicit
       image sub-task is appended.
-    * **Analytical asks are kept whole.** A query carrying a comparison/analysis
-      verb (see ``_has_analysis_verb``) is a single reasoning ask and skips the
-      model split entirely — the 3B gate is unreliable here and tends to shred
-      one analytical sentence into syntactic fragments (e.g. "Compare X" / "to
-      Y" / "and evaluate the tradeoffs"), which the prompt cannot reliably
-      prevent. Keeping it whole lets ``gate_score`` route the intact ask (with
-      its analysis boost) to the reasoning expert. The trade-off: a query that
-      genuinely mixes an analytical ask with unrelated ones stays whole and goes
-      to the reasoning expert, which can handle the multi-part request.
+    * **Single analytical asks are kept whole.** A query carrying a
+      comparison/analysis verb (see ``_has_analysis_verb``) *and no second-ask
+      cue* (see ``_has_extra_ask_cue``) is one reasoning ask and skips the model
+      split entirely — the 3B gate is unreliable here and tends to shred a single
+      analytical sentence into syntactic fragments (e.g. "Compare X" / "to Y" /
+      "and evaluate the tradeoffs"), which the prompt cannot reliably prevent.
+      Keeping it whole lets ``gate_score`` route the intact ask (with its
+      analysis boost) to the reasoning expert. A query that genuinely *mixes* an
+      analytical ask with a distinct one ("compare X to Y, and also tell me what
+      7x8 is") still decomposes so its parts fan out to different experts.
     * **Recursive decomposition.** Any sub-task that still reads as a compound
       request (see ``_has_recursion_cue``) is decomposed one level deeper, so
       each leaf is a single ask. ``_depth`` tracks recursion and is recorded on
@@ -227,7 +249,9 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
       ``MAX_LEAVES`` (total leaves), so it always terminates. ``_depth`` is an
       internal parameter — callers pass only ``query`` and ``has_image``.
     """
-    if _is_simple(query) or _has_analysis_verb(query):
+    if _is_simple(query) or (
+        _has_analysis_verb(query) and not _has_extra_ask_cue(query)
+    ):
         return [{"subtask": query, "depends_on_image": has_image, "depth": _depth}]
 
     prompt = _decomposition_prompt(query, has_image)
@@ -235,7 +259,7 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
     for attempt in range(2):
         # Temperature 0 + the JSON-array schema make the gate deterministic and
         # its output reliably parseable.
-        result = llama32_client.generate(
+        result = await llama32_client.generate(
             prompt,
             options={"temperature": 0},
             response_format=_DECOMPOSITION_SCHEMA,
@@ -304,7 +328,7 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
             and len(leaves) < MAX_LEAVES
         )
         if can_recurse:
-            children = decompose(st["subtask"], False, _depth + 1)
+            children = await decompose(st["subtask"], False, _depth + 1)
             # Only accept the split if it actually produced more than one leaf;
             # otherwise keep the sub-task whole.
             if len(children) > 1:

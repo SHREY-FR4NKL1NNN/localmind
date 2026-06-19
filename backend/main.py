@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 # import time (the model clients capture OLLAMA_BASE_URL on import).
 load_dotenv()
 
-import requests  # noqa: E402  (imported after dotenv on purpose)
+import httpx  # noqa: E402  (imported after dotenv on purpose)
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
@@ -76,6 +76,16 @@ class SynthesisResult(BaseModel):
     latency_ms: int
 
 
+class SparsityInfo(BaseModel):
+    """How few of the available experts a decomposed query activated."""
+
+    experts_activated: int = Field(..., description="Distinct experts that actually ran.")
+    experts_available: int = Field(..., description="Total experts in the tiered system (4).")
+    sparsity_ratio: float = Field(..., description="experts_activated / experts_available.")
+    vision_activated: bool = Field(..., description="True if the LLaVA vision expert ran.")
+    activated_expert_names: list[str] = Field(..., description="Sorted distinct expert tags that ran.")
+
+
 class DecomposedResponse(BaseModel):
     """Response returned by ``POST /query/decomposed``."""
 
@@ -84,7 +94,15 @@ class DecomposedResponse(BaseModel):
     subtasks: list[SubtaskDecision]
     synthesis: SynthesisResult | None = Field(
         default=None,
-        description="Unified answer fusing all sub-task responses; null when fewer than two sub-tasks were answered.",
+        description="Legacy combiner view for the dashboard; null when the combiner was skipped.",
+    )
+    combined_response: str = Field(..., description="The unified reply (or the lone sub-task answer when skipped).")
+    combiner_skipped: bool = Field(..., description="True when the combiner did not run (≤1 usable answer).")
+    combiner_latency_ms: int = Field(..., description="Combiner call latency; 0 when skipped.")
+    sparsity: SparsityInfo
+    total_latency_ms: int = Field(
+        ...,
+        description="Wall-clock for the parallel expert batch + combiner; tracks the slowest expert, not the sum.",
     )
     timestamp: str
 
@@ -144,22 +162,23 @@ app.add_middleware(
 
 
 @app.post("/query", response_model=RouterResponse)
-def post_query(request: QueryRequest) -> dict:
+async def post_query(request: QueryRequest) -> dict:
     """Classify and route a query, returning the full routing decision."""
-    return router_module.handle_query(request.query)
+    return await router_module.handle_query(request.query)
 
 
 @app.post("/query/decomposed", response_model=DecomposedResponse)
-def post_query_decomposed(request: DecomposedQueryRequest) -> dict:
+async def post_query_decomposed(request: DecomposedQueryRequest) -> dict:
     """Decompose a query into sub-tasks and route each to its expert.
 
     Runs the full tiered, Mixture-of-Experts-inspired flow: the gate splits the
     query into sub-tasks (recursively where a sub-task is itself compound),
-    scores each to one expert, executes the selected experts in parallel, and
-    synthesizes their answers into one unified response. Simple queries return a
-    single, non-decomposed sub-task and no synthesis.
+    scores each to one expert, executes the selected experts concurrently with
+    ``asyncio.gather``, and combines their answers into one unified response.
+    Simple queries return a single, non-decomposed sub-task with the combiner
+    skipped.
     """
-    return router_module.route_decomposed(request.query, request.image_base64)
+    return await router_module.route_decomposed(request.query, request.image_base64)
 
 
 @app.get("/history", response_model=list[RouterResponse])
@@ -174,22 +193,33 @@ def get_stats() -> dict:
     return decision_log.get_stats()
 
 
+@app.get("/expert-stats")
+def get_expert_stats() -> dict:
+    """Return per-expert activation counts and their share of all activations.
+
+    Reflects the tiered (decomposed) flow's lifetime expert utilisation since
+    process start — a window into which experts the router actually exercises.
+    """
+    return decision_log.get_expert_activation_stats()
+
+
 @app.get("/health", response_model=HealthResponse)
-def get_health() -> dict:
+async def get_health() -> dict:
     """Report service health and live Ollama reachability.
 
     Pings Ollama's ``/api/tags`` endpoint to confirm it is running and reports
     which of the required models are currently available.
     """
     try:
-        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
-        resp.raise_for_status()
-        available = [m.get("name", "") for m in resp.json().get("models", [])]
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp.raise_for_status()
+            available = [m.get("name", "") for m in resp.json().get("models", [])]
         present = [
             required
             for required in REQUIRED_MODELS
             if any(name == required or name.startswith(required) for name in available)
         ]
         return {"status": "ok", "ollama": "reachable", "models": present}
-    except requests.exceptions.RequestException:
+    except httpx.HTTPError:
         return {"status": "ok", "ollama": "unreachable", "models": []}

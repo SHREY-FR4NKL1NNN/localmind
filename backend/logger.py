@@ -9,7 +9,7 @@ buffer holds at most ``MAX_ENTRIES`` decisions and evicts the oldest first
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from statistics import mean
 from threading import Lock
 
@@ -27,6 +27,11 @@ class DecisionLog:
         # endpoints are completely unaffected by their differing shape.
         # Unified reporting across both is a later upgrade.
         self._subtask_entries: deque[dict] = deque(maxlen=max_entries)
+        # Lifetime tally of expert activations across every decomposed query.
+        # Unlike the bounded buffers above this is a running count that is never
+        # evicted, so it reflects total usage since process start — the basis
+        # for the per-expert utilisation reported by /expert-stats.
+        self._expert_activations: Counter[str] = Counter()
         self._lock = Lock()
 
     def log(self, decision: dict) -> None:
@@ -43,6 +48,31 @@ class DecisionLog:
         """
         with self._lock:
             self._subtask_entries.append(dict(decision))
+            # One logged sub-task == one expert activation. Count it here so the
+            # tally stays consistent with what actually ran.
+            expert = decision.get("expert")
+            if expert:
+                self._expert_activations[expert] += 1
+
+    def get_expert_activation_stats(self) -> dict:
+        """Return per-expert activation counts and their share of the total.
+
+        Aggregates the lifetime activation tally across all decomposed queries.
+        Returns ``{"total_activations": int, "experts": {name: {"count": int,
+        "pct": float}}}`` where ``pct`` is each expert's percentage of all
+        activations (0.0 when nothing has run yet).
+        """
+        with self._lock:
+            counts = dict(self._expert_activations)
+        total = sum(counts.values())
+        experts = {
+            name: {
+                "count": count,
+                "pct": round(100.0 * count / total, 1) if total else 0.0,
+            }
+            for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        }
+        return {"total_activations": total, "experts": experts}
 
     def get_subtask_history(self, n: int = 50) -> list[dict]:
         """Return the most recent ``n`` sub-task decisions, newest first."""
