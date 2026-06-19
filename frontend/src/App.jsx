@@ -3,11 +3,13 @@ import StatsBar from './components/StatsBar'
 import QueryInput from './components/QueryInput'
 import ResponsePanel from './components/ResponsePanel'
 import DecomposedPanel from './components/DecomposedPanel'
+import StreamingPanel from './components/StreamingPanel'
 import LiveFeed from './components/LiveFeed'
 import { getHealth } from './api'
 
 export default function App() {
   const [latest, setLatest] = useState(null)
+  const [streamRequest, setStreamRequest] = useState(null)
   const [health, setHealth] = useState(null)
 
   // Single source of truth for Ollama health: polled here every 10s and shared
@@ -50,8 +52,19 @@ export default function App() {
 
       <div className="app__columns">
         <div className="app__left">
-          <QueryInput onResult={setLatest} />
-          {Array.isArray(latest?.subtasks) ? (
+          <QueryInput
+            onResult={(r) => {
+              setStreamRequest(null)
+              setLatest(r)
+            }}
+            onStream={(req) => {
+              setLatest(null)
+              setStreamRequest(req)
+            }}
+          />
+          {streamRequest ? (
+            <StreamingPanel request={streamRequest} />
+          ) : Array.isArray(latest?.subtasks) ? (
             <DecomposedPanel result={latest} />
           ) : (
             <ResponsePanel result={latest} />

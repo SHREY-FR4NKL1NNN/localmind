@@ -18,6 +18,7 @@ the combination is necessarily textual.
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncGenerator
 
 from models import llama32_client
 
@@ -35,6 +36,31 @@ def _skip(combined_response: str) -> dict:
         "combiner_model": COMBINER_MODEL,
         "skipped": True,
     }
+
+
+def _build_prompt(original_query: str, usable: list[dict]) -> str:
+    """Build the synthesis prompt fed to Llama 3.2.
+
+    Each usable sub-answer is labelled; results from the vision expert are
+    labelled ``Image analysis:`` so the combiner knows they describe an attached
+    image rather than answering a text sub-task. Shared by both ``combine`` and
+    ``combine_stream`` so the two paths fuse answers identically.
+    """
+    blocks = []
+    for i, r in enumerate(usable, start=1):
+        if r.get("expert") == "llava":
+            blocks.append(f"Image analysis: {r['response']}")
+        else:
+            blocks.append(f"Sub-task {i}: {r['subtask']}\nAnswer: {r['response']}")
+    answers = "\n\n".join(blocks)
+    return (
+        "Several sub-tasks of a single user request were answered separately "
+        "below. Combine them into ONE coherent, well-organised reply to the "
+        "original request. Do not mention that the work was split up, and do "
+        "not refer to 'sub-tasks' or which model produced what — just give the "
+        "unified answer.\n\n"
+        f"Original request: {original_query}\n\n{answers}\n\nUnified answer:"
+    )
 
 
 async def combine(original_query: str, subtask_results: list[dict]) -> dict:
@@ -63,18 +89,7 @@ async def combine(original_query: str, subtask_results: list[dict]) -> dict:
         lone = usable[0]["response"] if usable else subtask_results[0]["response"]
         return _skip(lone)
 
-    answers = "\n\n".join(
-        f"Sub-task {i}: {r['subtask']}\nAnswer: {r['response']}"
-        for i, r in enumerate(usable, start=1)
-    )
-    prompt = (
-        "Several sub-tasks of a single user request were answered separately "
-        "below. Combine them into ONE coherent, well-organised reply to the "
-        "original request. Do not mention that the work was split up, and do "
-        "not refer to 'sub-tasks' or which model produced what — just give the "
-        "unified answer.\n\n"
-        f"Original request: {original_query}\n\n{answers}\n\nUnified answer:"
-    )
+    prompt = _build_prompt(original_query, usable)
 
     start = time.perf_counter()
     result = await llama32_client.generate(prompt)
@@ -91,3 +106,54 @@ async def combine(original_query: str, subtask_results: list[dict]) -> dict:
         "combiner_model": COMBINER_MODEL,
         "skipped": False,
     }
+
+
+async def combine_stream(
+    original_query: str, subtask_results: list[dict]
+) -> AsyncGenerator[dict, None]:
+    """Stream the combiner's unified answer token-by-token via Llama 3.2.
+
+    The streaming counterpart of ``combine``. Yields ``{"token", "done"}`` dicts;
+    the terminal chunk (``done=True``) additionally carries ``skipped`` and
+    ``combiner_latency_ms``.
+
+    When there is nothing to fuse — exactly one sub-task result, or fewer than
+    two usable (non-``[error]``) answers — Llama 3.2 is **not** called: a single
+    terminal chunk is yielded carrying the lone answer as its ``token`` with
+    ``skipped=True``. Otherwise the sub-answers are synthesised and the model's
+    chunks are forwarded as they arrive. Like the clients, this never raises — a
+    failed synthesis surfaces an ``[error]`` prefix in the terminal token.
+    """
+    if len(subtask_results) <= 1:
+        only = subtask_results[0]["response"] if subtask_results else ""
+        yield {"token": only, "done": True, "skipped": True, "combiner_latency_ms": 0}
+        return
+
+    usable = [r for r in subtask_results if not r["response"].startswith("[error]")]
+    if len(usable) < 2:
+        lone = usable[0]["response"] if usable else subtask_results[0]["response"]
+        yield {"token": lone, "done": True, "skipped": True, "combiner_latency_ms": 0}
+        return
+
+    prompt = _build_prompt(original_query, usable)
+    start = time.perf_counter()
+    async for chunk in llama32_client.stream(prompt):
+        if chunk.get("error"):
+            combiner_latency_ms = int((time.perf_counter() - start) * 1000)
+            yield {
+                "token": f"[error] {chunk['error']}",
+                "done": True,
+                "skipped": False,
+                "combiner_latency_ms": combiner_latency_ms,
+            }
+            return
+        if chunk["done"]:
+            combiner_latency_ms = int((time.perf_counter() - start) * 1000)
+            yield {
+                "token": chunk["token"],
+                "done": True,
+                "skipped": False,
+                "combiner_latency_ms": combiner_latency_ms,
+            }
+            return
+        yield {"token": chunk["token"], "done": False}

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from statistics import mean
 
@@ -26,6 +27,15 @@ import gate
 from classifier import classify
 from logger import decision_log
 from models import deepseek_client, llama32_client, llava_client, mistral_client
+
+# Maps an expert name to its streaming client coroutine. The vision client also
+# takes an image; all four share the ``stream(prompt, image_base64=None)`` shape.
+_STREAM_EXPERT_CLIENTS = {
+    "llama3.2": llama32_client.stream,
+    "mistral": mistral_client.stream,
+    "deepseek-r1:7b": deepseek_client.stream,
+    "llava": llava_client.stream,
+}
 
 # Maps a gate-assigned expert name to the client coroutine that serves it. Only
 # the LLaVA client takes an image, so it is dispatched separately below.
@@ -245,4 +255,232 @@ async def route_decomposed(query: str, image_base64: str | None) -> dict:
         "sparsity": sparsity,
         "total_latency_ms": total_latency_ms,
         "timestamp": timestamp,
+    }
+
+
+def _sparsity(activated_experts: set[str]) -> dict:
+    """Build the sparsity metric from the set of experts that actually ran."""
+    activated = sorted(activated_experts)
+    return {
+        "experts_activated": len(activated),
+        "experts_available": EXPERTS_AVAILABLE,
+        "sparsity_ratio": round(len(activated) / EXPERTS_AVAILABLE, 3),
+        "vision_activated": "llava" in activated,
+        "activated_expert_names": activated,
+    }
+
+
+async def stream_decomposed(
+    query: str, image_base64: str | None
+) -> AsyncGenerator[dict, None]:
+    """Decompose, gate, then stream every expert concurrently, then combine.
+
+    The streaming counterpart of ``route_decomposed``. Yields transport-agnostic
+    event dicts ``{"event": str, "data": dict}`` that the API layer formats as
+    SSE. Event order:
+
+    1. ``gate_complete`` — the per-sub-task routing decisions, emitted *before*
+       any expert runs so the UI can render the routing immediately.
+    2. ``expert_token`` — one per streamed token, tagged with ``subtask_index``;
+       these **interleave** across experts because all experts stream at once.
+    3. ``expert_done`` — once per expert when its stream finishes.
+    4. ``sparsity`` — emitted after every expert has finished.
+    5. ``combiner_token`` — the synthesis, streamed token-by-token (skipped when
+       the combiner is skipped).
+    6. ``done`` — terminal summary.
+
+    Concurrency uses a fan-in pattern: one producer task per expert pushes its
+    chunks onto a single shared ``asyncio.Queue``, and this generator drains the
+    queue, emitting each chunk the instant it arrives in whatever order the
+    experts produce them. A per-producer sentinel signals completion. A failing
+    expert is isolated — its error surfaces as a token and ``expert_done`` but
+    never cancels the others.
+    """
+    has_image = image_base64 is not None
+    sub_tasks = await gate.decompose(query, has_image)
+    scores = [
+        gate.gate_score(st["subtask"], st["depends_on_image"]) for st in sub_tasks
+    ]
+
+    yield {
+        "event": "gate_complete",
+        "data": {
+            "subtasks": [
+                {
+                    "subtask_index": i,
+                    "subtask": st["subtask"],
+                    "expert": sc["expert"],
+                    "complexity": sc["complexity"],
+                    "privacy": sc["privacy"],
+                    "reasoning": sc["reasoning"],
+                    "hard_routed": sc["hard_routed"],
+                    "depth": st.get("depth", 0),
+                }
+                for i, (st, sc) in enumerate(zip(sub_tasks, scores))
+            ]
+        },
+    }
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    batch_start = time.perf_counter()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _produce(idx: int, expert: str, subtask: str) -> None:
+        """Stream one expert, pushing tagged chunks then a sentinel onto the queue."""
+        start = time.perf_counter()
+        collected: list[str] = []
+        errored: str | None = None
+        client = _STREAM_EXPERT_CLIENTS.get(expert)
+        try:
+            if client is None:
+                errored = f"No streaming client for expert '{expert}'."
+            else:
+                async for chunk in client(subtask, image_base64):
+                    if chunk.get("error"):
+                        errored = chunk["error"]
+                        await queue.put(
+                            {
+                                "kind": "token",
+                                "idx": idx,
+                                "expert": expert,
+                                "token": f"[error] {chunk['error']}",
+                                "is_thinking": False,
+                            }
+                        )
+                    else:
+                        token = chunk.get("token", "")
+                        # The final answer excludes DeepSeek's reasoning trace.
+                        if not chunk.get("is_thinking", False):
+                            collected.append(token)
+                        await queue.put(
+                            {
+                                "kind": "token",
+                                "idx": idx,
+                                "expert": expert,
+                                "token": token,
+                                "is_thinking": bool(chunk.get("is_thinking", False)),
+                            }
+                        )
+                    if chunk.get("done"):
+                        break
+        except Exception as exc:  # noqa: BLE001 — isolate one expert's failure
+            errored = str(exc)
+            await queue.put(
+                {
+                    "kind": "token",
+                    "idx": idx,
+                    "expert": expert,
+                    "token": f"[error] {exc}",
+                    "is_thinking": False,
+                }
+            )
+        finally:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            full = f"[error] {errored}" if errored else "".join(collected)
+            await queue.put(
+                {
+                    "kind": "done",
+                    "idx": idx,
+                    "expert": expert,
+                    "full_response": full,
+                    "latency_ms": latency_ms,
+                }
+            )
+            await queue.put({"kind": "sentinel"})
+
+    producers = [
+        asyncio.create_task(_produce(i, sc["expert"], st["subtask"]))
+        for i, (st, sc) in enumerate(zip(sub_tasks, scores))
+    ]
+
+    full_responses: dict[int, str] = {}
+    latencies: dict[int, int] = {}
+    try:
+        remaining = len(producers)
+        while remaining > 0:
+            item = await queue.get()
+            kind = item["kind"]
+            if kind == "sentinel":
+                remaining -= 1
+            elif kind == "token":
+                yield {
+                    "event": "expert_token",
+                    "data": {
+                        "subtask_index": item["idx"],
+                        "expert": item["expert"],
+                        "token": item["token"],
+                        "is_thinking": item["is_thinking"],
+                    },
+                }
+            elif kind == "done":
+                full_responses[item["idx"]] = item["full_response"]
+                latencies[item["idx"]] = item["latency_ms"]
+                yield {
+                    "event": "expert_done",
+                    "data": {
+                        "subtask_index": item["idx"],
+                        "expert": item["expert"],
+                        "full_response": item["full_response"],
+                        "latency_ms": item["latency_ms"],
+                    },
+                }
+    finally:
+        # If the consumer is abandoned (client disconnect), don't leak producers.
+        for task in producers:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*producers, return_exceptions=True)
+
+    # Assemble the per-sub-task results (now that every expert has finished) for
+    # logging, the combiner, and the sparsity metric.
+    subtask_results: list[dict] = []
+    for i, (st, sc) in enumerate(zip(sub_tasks, scores)):
+        entry = {
+            "subtask": st["subtask"],
+            "expert": sc["expert"],
+            "complexity": sc["complexity"],
+            "privacy": sc["privacy"],
+            "reasoning": sc["reasoning"],
+            "hard_routed": sc["hard_routed"],
+            "response": full_responses.get(i, ""),
+            "latency_ms": latencies.get(i, 0),
+            "depth": st.get("depth", 0),
+        }
+        subtask_results.append(entry)
+        decision_log.log_subtask({"query": query, "timestamp": timestamp, **entry})
+
+    yield {
+        "event": "sparsity",
+        "data": _sparsity({entry["expert"] for entry in subtask_results}),
+    }
+
+    # Combiner: stream the synthesis (or carry the lone answer when skipped).
+    combined_parts: list[str] = []
+    combined_response = ""
+    combiner_skipped = False
+    combiner_latency_ms = 0
+    async for chunk in combiner.combine_stream(query, subtask_results):
+        if chunk["done"]:
+            combiner_skipped = bool(chunk.get("skipped", False))
+            combiner_latency_ms = int(chunk.get("combiner_latency_ms", 0))
+            if combiner_skipped:
+                combined_response = chunk["token"]
+            else:
+                if chunk["token"]:
+                    combined_parts.append(chunk["token"])
+                    yield {"event": "combiner_token", "data": {"token": chunk["token"]}}
+                combined_response = "".join(combined_parts)
+            break
+        combined_parts.append(chunk["token"])
+        yield {"event": "combiner_token", "data": {"token": chunk["token"]}}
+
+    total_latency_ms = int((time.perf_counter() - batch_start) * 1000)
+    yield {
+        "event": "done",
+        "data": {
+            "combined_response": combined_response,
+            "total_latency_ms": total_latency_ms,
+            "combiner_skipped": combiner_skipped,
+            "combiner_latency_ms": combiner_latency_ms,
+        },
     }

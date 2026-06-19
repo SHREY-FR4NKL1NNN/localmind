@@ -13,6 +13,7 @@ calls. CORS is enabled for the Vite dev server at http://localhost:5173.
 
 from __future__ import annotations
 
+import json
 import os
 
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ load_dotenv()
 import httpx  # noqa: E402  (imported after dotenv on purpose)
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 import router as router_module  # noqa: E402
@@ -179,6 +181,31 @@ async def post_query_decomposed(request: DecomposedQueryRequest) -> dict:
     skipped.
     """
     return await router_module.route_decomposed(request.query, request.image_base64)
+
+
+@app.post("/query/decomposed/stream")
+async def post_query_decomposed_stream(request: DecomposedQueryRequest) -> StreamingResponse:
+    """Stream the tiered flow over Server-Sent Events.
+
+    Runs the same decompose → gate → parallel-experts → combine pipeline as
+    ``/query/decomposed`` but streams it live: a ``gate_complete`` event with the
+    routing, then interleaved ``expert_token`` events as the experts stream
+    concurrently, ``expert_done`` per expert, a ``sparsity`` event, the combiner's
+    ``combiner_token`` events, and a terminal ``done`` event. Each event is sent
+    in the SSE wire format ``event: <type>\\ndata: <json>\\n\\n``.
+    """
+
+    async def event_source():
+        async for event in router_module.stream_decomposed(
+            request.query, request.image_base64
+        ):
+            yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/history", response_model=list[RouterResponse])

@@ -506,3 +506,186 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- image dropzone (QueryInput) ---- */
+.dropzone {
+  margin-top: 12px;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone--over {
+  border-color: var(--accent-deepseek);
+  background: var(--surface-2);
+}
+
+.dropzone__hint {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.dropzone__preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+}
+
+.thumb {
+  max-height: 72px;
+  max-width: 120px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* ---- streaming panel ---- */
+.expanels {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.expanel {
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--text-muted);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+
+.expanel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.expanel__task {
+  font-size: 13px;
+  color: var(--text);
+  flex: 1;
+  min-width: 120px;
+}
+
+.expanel__status {
+  margin-left: auto;
+}
+
+.latency-badge {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.streaming-dot {
+  font-size: 12px;
+  color: var(--accent-mistral);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.expanel__body {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* DeepSeek thinking trace */
+.think {
+  margin-top: 10px;
+  border-left: 3px solid var(--accent-deepseek);
+  background: color-mix(in srgb, var(--accent-deepseek) 10%, transparent);
+  border-radius: 0 8px 8px 0;
+}
+
+.think__toggle {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--accent-deepseek);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.think__body {
+  padding: 0 12px 10px;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  font-style: italic;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* sparsity badge */
+.sparsity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.sparsity__main {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sparsity__ratio,
+.sparsity__vision,
+.sparsity__names {
+  color: var(--text-muted);
+}
+
+/* combiner panel */
+.combiner {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+
+.combiner__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.combiner__label {
+  font-weight: 600;
+  color: var(--accent-deepseek);
+}

@@ -56,13 +56,61 @@ export function postQuery(query) {
 }
 
 // Tiered MoE flow: decompose the query into sub-tasks, route each to an expert,
-// run them in parallel, and synthesize a unified answer.
-export function postQueryDecomposed(query) {
+// run them in parallel, and synthesize a unified answer. Optional base64 image
+// is forwarded so vision sub-tasks can hard-route to LLaVA.
+export function postQueryDecomposed(query, imageBase64 = null) {
   return request('/query/decomposed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, image_base64: imageBase64 }),
   })
+}
+
+// Parse one raw SSE event block ("event: x\ndata: {...}") into { event, data }.
+function parseSSEEvent(raw) {
+  let event = 'message'
+  const dataLines = []
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+  }
+  if (dataLines.length === 0) return null
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) }
+  } catch {
+    return null
+  }
+}
+
+// Streaming tiered flow over Server-Sent Events. EventSource can't POST a body,
+// so we read the fetch ReadableStream manually and split it on the SSE record
+// separator (\n\n). `onEvent(type, data)` fires per event as it arrives.
+// Returns when the stream closes; throws on a failed connection.
+export async function streamDecomposed({ query, imageBase64 = null, onEvent, signal }) {
+  const res = await fetch(`${API_BASE}/query/decomposed/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, image_base64: imageBase64 }),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    throw new Error(`Stream request failed with status ${res.status}`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let sep
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sep)
+      buffer = buffer.slice(sep + 2)
+      const parsed = parseSSEEvent(rawEvent)
+      if (parsed) onEvent(parsed.event, parsed.data)
+    }
+  }
 }
 
 export function getStats() {
