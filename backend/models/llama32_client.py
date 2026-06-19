@@ -23,7 +23,14 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 MODEL_NAME = "llama3.2"
 DISPLAY_NAME = "Llama 3.2"
-TIMEOUT_SECONDS = 20
+# Llama 3.2 is the smallest model, but it is the busiest one in the decomposed
+# flow: it serves as both the gate (decomposition) AND the fast expert, so a
+# single decomposed query can issue several llama3.2 calls that Ollama queues
+# behind one another. On a memory-constrained GPU Ollama also swaps models in
+# and out, adding cold-load time to a queued call. A 20s budget was too tight
+# under that contention (observed timeouts on trivial sub-tasks); 45s gives the
+# queued/cold calls headroom while still failing fast on a genuinely stuck call.
+TIMEOUT_SECONDS = 45
 
 
 def generate(

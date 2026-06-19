@@ -42,9 +42,15 @@ _recent_deepseek_latencies: deque[int] = deque(maxlen=20)
 
 # Upper bound on concurrent expert calls in the decomposed flow. The model
 # clients are blocking I/O (HTTP to Ollama), so threads overlap their network
-# waits well; the cap keeps us from hammering Ollama with more simultaneous
-# generations than it can usefully serve.
-MAX_PARALLEL_EXPERTS = 4
+# waits well. The cap keeps us from hammering Ollama with more simultaneous
+# generations than it can usefully serve. It is deliberately conservative: on a
+# memory-constrained GPU the experts are *different* models that do not all fit
+# in VRAM at once, so Ollama serialises them by swapping models in and out.
+# Issuing many concurrent calls then just deepens that queue and pushes the
+# slowest queued call past its client timeout (observed live), without buying
+# real parallelism. A small cap keeps the queue shallow while still overlapping
+# the cases that genuinely can run together.
+MAX_PARALLEL_EXPERTS = 2
 
 # The synthesis/combiner step is served by Mistral: the general-purpose expert
 # is a good fit for fusing several short answers into one coherent reply without

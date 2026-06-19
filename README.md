@@ -145,8 +145,11 @@ sensitive vocabulary (financial, health, address terms).
    still reads as a compound request (joined by `and` / `also` / `then` /
    `as well as`) is decomposed one level deeper, bounded by a depth cap
    (`MAX_DEPTH`) and a leaf cap (`MAX_LEAVES`) so it always terminates. An
-   analytical ask like *"compare X to Y"* is deliberately kept whole rather than
-   atomised.
+   analytical ask carrying a comparison/analysis verb (*"compare X to Y and
+   evaluate the tradeoffs"*) **skips decomposition entirely** and is kept whole:
+   the 3B gate otherwise tends to shred one analytical sentence into syntactic
+   fragments, which the prompt alone cannot reliably prevent. The intact ask is
+   then routed to the reasoning expert via its complexity boost (below).
 
 2. **Score** (`gate.gate_score`). Each sub-task is routed to exactly one expert:
 
@@ -166,7 +169,11 @@ sensitive vocabulary (financial, health, address terms).
 3. **Run in parallel** (`router.route_decomposed`). The selected experts execute
    concurrently on a bounded thread pool — the blocking Ollama calls overlap
    their network waits — while results keep sub-task order. **Sparse
-   activation:** only the chosen experts run, never all four.
+   activation:** only the chosen experts run, never all four. The concurrency cap
+   (`MAX_PARALLEL_EXPERTS`) is deliberately conservative: on a memory-constrained
+   GPU the experts are different models that don't all fit in VRAM at once, so
+   Ollama serialises them by swapping; a high cap just deepens that queue and
+   pushes the slowest queued call past its client timeout.
 
 4. **Synthesize** (`router._synthesize`, Mistral 7B). When more than one
    sub-task was answered, the combiner fuses the individual answers into one

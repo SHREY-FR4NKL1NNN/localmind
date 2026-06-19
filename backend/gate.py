@@ -113,6 +113,21 @@ def _has_recursion_cue(text: str) -> bool:
     )
 
 
+def _has_analysis_verb(text: str) -> bool:
+    """Return True if a sub-task contains a comparison/analysis verb.
+
+    Such a sub-task is a single reasoning-heavy ask (e.g. "compare X to Y and
+    evaluate the tradeoffs") and must stay whole: the conjunction inside it joins
+    two facets of one analysis, not two independent requests. Recursive
+    decomposition keys off ``"and"`` (see ``RECURSION_CUES``), which would
+    otherwise shatter such an ask into trivial fragments — observed live — so the
+    recursion guard uses this to leave analytical sub-tasks intact. Mirrors the
+    boost detection in ``gate_score`` (substring match on ``ANALYSIS_VERBS``).
+    """
+    lowered = text.lower()
+    return any(verb in lowered for verb in ANALYSIS_VERBS)
+
+
 def _decomposition_prompt(query: str, has_image: bool) -> str:
     """Build the few-shot decomposition instruction for Llama 3.2.
 
@@ -196,6 +211,15 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
     * When ``has_image`` is True, at least one returned sub-task is guaranteed to
       carry ``depends_on_image=True`` — if the model produced none, an explicit
       image sub-task is appended.
+    * **Analytical asks are kept whole.** A query carrying a comparison/analysis
+      verb (see ``_has_analysis_verb``) is a single reasoning ask and skips the
+      model split entirely — the 3B gate is unreliable here and tends to shred
+      one analytical sentence into syntactic fragments (e.g. "Compare X" / "to
+      Y" / "and evaluate the tradeoffs"), which the prompt cannot reliably
+      prevent. Keeping it whole lets ``gate_score`` route the intact ask (with
+      its analysis boost) to the reasoning expert. The trade-off: a query that
+      genuinely mixes an analytical ask with unrelated ones stays whole and goes
+      to the reasoning expert, which can handle the multi-part request.
     * **Recursive decomposition.** Any sub-task that still reads as a compound
       request (see ``_has_recursion_cue``) is decomposed one level deeper, so
       each leaf is a single ask. ``_depth`` tracks recursion and is recorded on
@@ -203,7 +227,7 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
       ``MAX_LEAVES`` (total leaves), so it always terminates. ``_depth`` is an
       internal parameter — callers pass only ``query`` and ``has_image``.
     """
-    if _is_simple(query):
+    if _is_simple(query) or _has_analysis_verb(query):
         return [{"subtask": query, "depends_on_image": has_image, "depth": _depth}]
 
     prompt = _decomposition_prompt(query, has_image)
@@ -262,9 +286,12 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
 
     # Recursive pass: re-decompose any sub-task that still looks compound, one
     # level deeper. Bounded by MAX_DEPTH (we only recurse while the *next* depth
-    # stays under the cap) and MAX_LEAVES (the running total of leaves). Image
-    # sub-tasks and sub-tasks identical to the parent query are never recursed —
-    # the former is an atomic hard-route, the latter would not make progress.
+    # stays under the cap) and MAX_LEAVES (the running total of leaves). Three
+    # kinds of sub-task are never recursed: image sub-tasks (an atomic
+    # hard-route), a sub-task identical to the parent query (would not make
+    # progress), and an analytical ask carrying a comparison/analysis verb (its
+    # internal "and" joins facets of one analysis, not separate requests — see
+    # _has_analysis_verb).
     leaves: list[dict] = []
     for st in subtasks:
         st["depth"] = _depth
@@ -272,6 +299,7 @@ def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
             _depth + 1 < MAX_DEPTH
             and not st["depends_on_image"]
             and _has_recursion_cue(st["subtask"])
+            and not _has_analysis_verb(st["subtask"])
             and st["subtask"].strip().lower() != query.strip().lower()
             and len(leaves) < MAX_LEAVES
         )
