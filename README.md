@@ -1,6 +1,12 @@
 # LocalMind
 
+[![CI](https://github.com/SHREY-FR4NKL1NNN/localmind/actions/workflows/ci.yml/badge.svg)](https://github.com/SHREY-FR4NKL1NNN/localmind/actions/workflows/ci.yml)
+
 **Smart local LLM routing — the right model for the right query, entirely on your own machine.**
+
+> 📐 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design: the MoE
+> analogy (and where it deviates), routing rules, the streaming fan-in, and an
+> honest list of limitations.
 
 LocalMind is a routing layer that sits in front of several locally-served
 language models and decides, per query, which one should answer. It runs in two
@@ -236,6 +242,54 @@ The dashboard is now at `http://localhost:5173`. Toggle **Decompose (MoE)** next
 to the Submit button to run the tiered flow and see the per-sub-task trace plus
 the synthesized answer.
 
+## Testing
+
+The backend ships with a `pytest` suite that runs **without Ollama** — every
+model client is mocked via a fixture in `tests/conftest.py`, so the suite (and
+CI) need no GPU and no running models.
+
+```bash
+cd localmind/backend
+pip install pytest pytest-asyncio httpx
+pytest tests/ -v
+```
+
+What's covered:
+
+- **`test_classifier.py`** — the routing scorer (`gate.gate_score`): trivial →
+  `llama3.2`, moderate → `mistral`, complex → `deepseek-r1:7b`, the image
+  hard-route to `llava`, the privacy override, and the analysis-verb boost.
+- **`test_gate.py`** — `gate.decompose` with the Llama 3.2 call mocked: the
+  short-query short-circuit (no model call), valid-JSON decomposition, graceful
+  fallback on invalid JSON, and the auto-added vision sub-task for images.
+- **`test_combiner.py`** — `combiner.combine`: single-sub-task skip, multi
+  synthesis, and the `Image analysis:` labelling of LLaVA results.
+- **`test_router.py`** — `router.route_decomposed`: parallel fan-out + sparsity,
+  the full return shape, and one expert erroring without crashing the others.
+- **`test_api.py`** — FastAPI integration via `httpx.AsyncClient` + `ASGITransport`
+  for `/health`, `/expert-stats`, and `/query/decomposed`.
+
+CI runs the same suite plus `ruff` on every push to `main` / `feature/*` and on
+PRs (see `.github/workflows/ci.yml`).
+
+## Data persistence
+
+Every query (single-route and decomposed) is persisted to a local SQLite database
+at **`backend/localmind.db`** (table `query_log`) using the standard-library
+`sqlite3` module — no ORM, no extra dependency. History, aggregate stats, and
+per-expert utilisation are computed with SQL aggregates and survive restarts. The
+database file is git-ignored.
+
+Export the full log to JSON for a demo or for sharing:
+
+```python
+from logger import decision_log
+decision_log.export_json("localmind_log.export.json")
+```
+
+Override the database location (e.g. for tests or an ephemeral run) with the
+`LOCALMIND_DB` environment variable.
+
 ## Technical decisions
 
 - **Rule-based classifier and gate instead of learned ones.** The routing
@@ -264,11 +318,15 @@ the synthesized answer.
   routing logic be tested and reused independently of any UI, gives us free
   interactive API docs via FastAPI, and lets the React dashboard iterate with
   hot-reload.
-- **In-memory logging instead of a database.** Routing history is ephemeral
-  demo/observability data, not a system of record. An in-memory ring buffer
-  keeps the project dependency-free and starts instantly with nothing to migrate.
-  Single-route and decomposed sub-task decisions are kept in separate buffers so
-  their differing shapes never perturb the existing `/stats` and `/history`.
+- **SQLite persistence via the standard library.** Every query is written to a
+  `query_log` table (`backend/localmind.db`) using built-in `sqlite3` — no ORM,
+  no extra dependency. History/stats/expert-utilisation are SQL aggregates and
+  survive restarts, while a per-operation connection with `check_same_thread=False`
+  plus a write lock keeps it safe under FastAPI's async handlers. `export_json()`
+  dumps the whole log for demos.
+- **Structured logging to stdout.** All modules log through a shared
+  `localmind.*` logger (`log_config.py`) at INFO (or DEBUG with `LOCALMIND_DEBUG=1`),
+  so routing decisions, latencies, and warnings are captured by systemd/Docker/CI.
 
 ## Scope expansion
 
@@ -292,34 +350,42 @@ the core decompose → gate → parallel → combine flow to function.
 
 ## What I'd build next
 
-- **Streaming responses via SSE** so tokens render as they're generated instead
-  of waiting for the full completion.
-- **Unified history/stats across both flows** so decomposed sub-tasks appear in
-  the live feed and aggregate metrics alongside single-route decisions.
-- **A learned gate** trained on real query/route data, with the current
-  rule-based gate as both the baseline and the labeller.
-- **Persistent SQLite logging with export** for longitudinal analysis of routing
-  quality and compute savings.
-- **Automatic model benchmarking on startup** to measure each model's real
-  latency profile and calibrate the compute-saved baseline dynamically.
+(Consistent with [ARCHITECTURE.md](ARCHITECTURE.md).)
+
+- **A learned gate** — fine-tune a small classifier on real query→route data
+  collected from this system, with the rule-based gate as both baseline and
+  labeller.
+- **Streaming decomposition** — start routing and running sub-tasks before the
+  full decomposition completes.
+- **Multi-GPU support** — true parallel expert inference with one model per GPU,
+  removing the single-GPU VRAM time-slicing bottleneck.
+- **Persistent conversation context** carried across sub-tasks and turns.
+- **Additional experts** — code-specialized (CodeLlama), multilingual (Qwen),
+  math-specialized (Mathstral).
 
 ## Project layout
 
 ```
 localmind/
+├── ARCHITECTURE.md        # full design: MoE analogy, routing rules, streaming, limitations
+├── .github/workflows/
+│   └── ci.yml             # GitHub Actions: pytest + ruff (no Ollama needed)
 ├── backend/
-│   ├── main.py            # FastAPI app: /query /query/decomposed /history /stats /expert-stats /health
-│   ├── router.py          # single-route + decomposed (decompose→gate→asyncio.gather→combine)
+│   ├── main.py            # FastAPI app: /query /query/decomposed(/stream) /history /stats /expert-stats /health
+│   ├── router.py          # single-route + decomposed (decompose→gate→asyncio.gather→combine) + SSE stream
 │   ├── gate.py            # MoE-inspired gate: decompose (recursive) + per-sub-task scoring
 │   ├── combiner.py        # async text-synthesis combiner (Llama 3.2); not a literal MoE weighted-sum
 │   ├── classifier.py      # complexity & privacy scoring + single-route policy
-│   ├── models/                # all async httpx.AsyncClient clients
+│   ├── models/                # all async httpx.AsyncClient clients (generate + stream)
 │   │   ├── llama32_client.py   # fast expert + decomposition gate (structured outputs) + combiner
 │   │   ├── mistral_client.py   # general expert
-│   │   ├── deepseek_client.py  # reasoning expert
+│   │   ├── deepseek_client.py  # reasoning expert (+ <think> trace stripping)
 │   │   └── llava_client.py     # vision expert (multimodal)
-│   ├── logger.py          # in-memory decision log + stats + expert-activation tally
+│   ├── logger.py          # SQLite query_log: history/stats/expert-stats/export (SQL aggregates)
+│   ├── log_config.py      # shared structured logging (localmind.* → stdout)
+│   ├── tests/             # pytest suite (classifier, gate, combiner, router, api); Ollama mocked
 │   ├── requirements.txt
+│   ├── .gitignore         # ignores localmind.db
 │   └── .env.example
 ├── frontend/
 │   ├── src/

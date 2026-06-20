@@ -29,7 +29,10 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 import router as router_module  # noqa: E402
+from log_config import get_logger  # noqa: E402
 from logger import decision_log  # noqa: E402
+
+logger = get_logger("api")
 
 # IPv4 loopback by default — see note in the model clients about IPv6 stalls.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -125,19 +128,32 @@ class RouterResponse(BaseModel):
     error: str | None = None
 
 
+class QueryLogEntry(BaseModel):
+    """One persisted query row returned by ``GET /history``."""
+
+    id: int
+    timestamp: str
+    query: str
+    decomposed: bool
+    subtask_count: int
+    experts_activated: list[str]
+    vision_activated: bool
+    combined_response: str | None = None
+    combiner_skipped: bool
+    total_latency_ms: int
+    sparsity_ratio: float
+
+
 class StatsResponse(BaseModel):
-    """Aggregate routing statistics returned by ``GET /stats``."""
+    """Aggregate query statistics returned by ``GET /stats`` (SQL aggregates)."""
 
     total_queries: int
-    mistral_count: int
-    deepseek_count: int
-    mistral_pct: float
-    deepseek_pct: float
-    total_compute_saved_ms: int
-    avg_latency_mistral_ms: float
-    avg_latency_deepseek_ms: float
-    avg_complexity: float
-    avg_privacy: float
+    decomposed_queries: int
+    single_route_queries: int
+    vision_queries: int
+    avg_total_latency_ms: float
+    avg_sparsity_ratio: float
+    avg_subtask_count: float
 
 
 class HealthResponse(BaseModel):
@@ -163,9 +179,19 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):  # noqa: ANN001
+    """Log any unhandled endpoint exception at ERROR and return a clean 500."""
+    from fastapi.responses import JSONResponse
+
+    logger.error("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
+
 @app.post("/query", response_model=RouterResponse)
 async def post_query(request: QueryRequest) -> dict:
     """Classify and route a query, returning the full routing decision."""
+    logger.info("POST /query received (%d chars)", len(request.query))
     return await router_module.handle_query(request.query)
 
 
@@ -208,15 +234,15 @@ async def post_query_decomposed_stream(request: DecomposedQueryRequest) -> Strea
     )
 
 
-@app.get("/history", response_model=list[RouterResponse])
+@app.get("/history", response_model=list[QueryLogEntry])
 def get_history() -> list[dict]:
-    """Return the 50 most recent routing decisions, newest first."""
+    """Return the 50 most recent persisted queries, newest first."""
     return decision_log.get_history(50)
 
 
 @app.get("/stats", response_model=StatsResponse)
 def get_stats() -> dict:
-    """Return aggregate statistics computed across all retained decisions."""
+    """Return aggregate statistics computed across all persisted queries."""
     return decision_log.get_stats()
 
 

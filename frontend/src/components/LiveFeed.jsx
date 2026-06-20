@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getHistory, routeColor, routeLabel } from '../api'
+import { expertColor, expertLabel, getHistory } from '../api'
 
 function formatTime(iso) {
   const d = new Date(iso)
@@ -54,17 +54,25 @@ export default function LiveFeed() {
       )}
 
       <div className="feed__rows">
-        {history.map((row, i) => (
-          <div className="feed-row" key={`${row.timestamp}-${i}`}>
-            <span className="dot dot--exp" style={{ '--exp': routeColor(row.route) }} />
-            <span className="feed-row__time">{formatTime(row.timestamp)}</span>
-            <span className="pill pill--exp" style={{ '--exp': routeColor(row.route) }}>
-              {routeLabel(row.route)}
-            </span>
-            <span className="feed-row__query">{truncate(row.query, 60)}</span>
-            <span className="feed-row__latency">{row.latency_ms} ms</span>
-          </div>
-        ))}
+        {history.map((row) => {
+          const experts = row.experts_activated || []
+          const primary = experts[0] || 'llama3.2'
+          const label =
+            row.decomposed && row.subtask_count > 1
+              ? `MoE · ${row.subtask_count}`
+              : expertLabel(primary)
+          return (
+            <div className="feed-row" key={row.id}>
+              <span className="dot dot--exp" style={{ '--exp': expertColor(primary) }} />
+              <span className="feed-row__time">{formatTime(row.timestamp)}</span>
+              <span className="pill pill--exp" style={{ '--exp': expertColor(primary) }}>
+                {label}
+              </span>
+              <span className="feed-row__query">{truncate(row.query, 60)}</span>
+              <span className="feed-row__latency">{row.total_latency_ms} ms</span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )

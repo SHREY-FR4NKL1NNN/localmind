@@ -20,7 +20,10 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncGenerator
 
+from log_config import get_logger
 from models import llama32_client
+
+logger = get_logger("combiner")
 
 # The combiner is served by Llama 3.2: the smallest/fastest model is enough to
 # stitch a handful of short answers into one reply, and keeping it off the

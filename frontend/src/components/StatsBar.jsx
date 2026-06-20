@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { expertColor, expertLabel, getExpertStats, getStats } from '../api'
 
-function formatSaved(ms) {
+function formatMs(ms) {
   if (!ms) return '0 ms'
   if (ms > 1000) return `${(ms / 1000).toFixed(1)} s`
   return `${Math.round(ms)} ms`
@@ -77,7 +77,9 @@ export default function StatsBar({ health }) {
       <span className="strip__divider" />
       <Stat label="Queries" value={stats?.total_queries ?? '—'} />
       <span className="strip__divider" />
-      <Stat label="Saved" value={stats ? formatSaved(stats.total_compute_saved_ms) : '—'} />
+      <Stat label="Decomposed" value={stats?.decomposed_queries ?? '—'} />
+      <span className="strip__divider" />
+      <Stat label="Avg latency" value={stats ? formatMs(stats.avg_total_latency_ms) : '—'} />
       <span className="strip__divider" />
       <div className="strip__stat strip__stat--grow">
         <span className="strip__label">Expert activation</span>

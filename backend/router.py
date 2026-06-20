@@ -25,8 +25,11 @@ from statistics import mean
 import combiner
 import gate
 from classifier import classify
+from log_config import get_logger
 from logger import decision_log
 from models import deepseek_client, llama32_client, llava_client, mistral_client
+
+logger = get_logger("router")
 
 # Maps an expert name to its streaming client coroutine. The vision client also
 # takes an image; all four share the ``stream(prompt, image_base64=None)`` shape.
@@ -79,6 +82,12 @@ async def handle_query(query: str) -> dict:
     """
     classification = classify(query)
     route = classification["route"]
+    logger.info(
+        "Single-route query (complexity=%.2f, privacy=%.2f) -> %s",
+        classification["complexity"],
+        classification["privacy"],
+        route,
+    )
 
     if route == "mistral":
         result = await mistral_client.generate(query)
@@ -87,6 +96,8 @@ async def handle_query(query: str) -> dict:
 
     latency_ms = int(result.get("latency_ms", 0))
     failed = "error" in result
+    if failed:
+        logger.warning("Single-route %s call failed: %s", route, result.get("error"))
 
     # Feed successful DeepSeek R1 latencies back into the rolling baseline.
     if route == "deepseek" and not failed and latency_ms > 0:
@@ -113,7 +124,24 @@ async def handle_query(query: str) -> dict:
     if failed:
         decision["error"] = result["error"]
 
-    decision_log.log(decision)
+    # Persist a query_log row (single-route maps to a one-expert, non-decomposed
+    # query so it shows up in history/stats alongside the decomposed flow).
+    expert = "mistral" if route == "mistral" else "deepseek-r1:7b"
+    decision_log.log(
+        {
+            "timestamp": decision["timestamp"],
+            "query": query,
+            "decomposed": False,
+            "subtask_count": 1,
+            "experts_activated": [expert],
+            "vision_activated": False,
+            "combined_response": decision["response"],
+            "combiner_skipped": True,
+            "total_latency_ms": latency_ms,
+            "sparsity_ratio": round(1 / EXPERTS_AVAILABLE, 3),
+        }
+    )
+    logger.info("Single-route response from %s in %d ms", expert, latency_ms)
     return decision
 
 
@@ -172,6 +200,12 @@ async def route_decomposed(query: str, image_base64: str | None) -> dict:
         len(sub_tasks) == 1 and sub_tasks[0]["subtask"].strip() == query.strip()
     )
     timestamp = datetime.now(timezone.utc).isoformat()
+    logger.info(
+        "Decomposed query into %d sub-task(s) (decomposed=%s, image=%s)",
+        len(sub_tasks),
+        decomposed,
+        has_image,
+    )
 
     # Score every sub-task first (cheap, pure-CPU heuristic), then dispatch the
     # expert calls concurrently. gate_score is deterministic and order-stable, so
@@ -217,20 +251,32 @@ async def route_decomposed(query: str, image_base64: str | None) -> dict:
             "depth": sub_task.get("depth", 0),
         }
         subtask_results.append(entry)
-        decision_log.log_subtask({"query": query, "timestamp": timestamp, **entry})
 
     combiner_result = await combiner.combine(query, subtask_results)
     total_latency_ms = int((time.perf_counter() - batch_start) * 1000)
 
     # Sparsity: how few of the available experts this query actually activated.
     activated = sorted({entry["expert"] for entry in subtask_results})
-    sparsity = {
-        "experts_activated": len(activated),
-        "experts_available": EXPERTS_AVAILABLE,
-        "sparsity_ratio": round(len(activated) / EXPERTS_AVAILABLE, 3),
-        "vision_activated": "llava" in activated,
-        "activated_expert_names": activated,
-    }
+    sparsity = _sparsity(set(activated))
+    logger.info(
+        "Decomposed query complete: experts=%s, total_latency=%d ms",
+        activated,
+        total_latency_ms,
+    )
+    decision_log.log(
+        {
+            "timestamp": timestamp,
+            "query": query,
+            "decomposed": decomposed,
+            "subtask_count": len(subtask_results),
+            "experts_activated": activated,
+            "vision_activated": sparsity["vision_activated"],
+            "combined_response": combiner_result["combined_response"],
+            "combiner_skipped": combiner_result["skipped"],
+            "total_latency_ms": total_latency_ms,
+            "sparsity_ratio": sparsity["sparsity_ratio"],
+        }
+    )
 
     # Legacy dashboard shape: DecomposedPanel renders `synthesis` when present.
     # It is None whenever the combiner was skipped.
@@ -447,12 +493,9 @@ async def stream_decomposed(
             "depth": st.get("depth", 0),
         }
         subtask_results.append(entry)
-        decision_log.log_subtask({"query": query, "timestamp": timestamp, **entry})
 
-    yield {
-        "event": "sparsity",
-        "data": _sparsity({entry["expert"] for entry in subtask_results}),
-    }
+    sparsity = _sparsity({entry["expert"] for entry in subtask_results})
+    yield {"event": "sparsity", "data": sparsity}
 
     # Combiner: stream the synthesis (or carry the lone answer when skipped).
     combined_parts: list[str] = []
@@ -475,6 +518,30 @@ async def stream_decomposed(
         yield {"event": "combiner_token", "data": {"token": chunk["token"]}}
 
     total_latency_ms = int((time.perf_counter() - batch_start) * 1000)
+
+    decomposed = not (
+        len(sub_tasks) == 1 and sub_tasks[0]["subtask"].strip() == query.strip()
+    )
+    decision_log.log(
+        {
+            "timestamp": timestamp,
+            "query": query,
+            "decomposed": decomposed,
+            "subtask_count": len(subtask_results),
+            "experts_activated": sparsity["activated_expert_names"],
+            "vision_activated": sparsity["vision_activated"],
+            "combined_response": combined_response,
+            "combiner_skipped": combiner_skipped,
+            "total_latency_ms": total_latency_ms,
+            "sparsity_ratio": sparsity["sparsity_ratio"],
+        }
+    )
+    logger.info(
+        "Streamed query complete: experts=%s, total_latency=%d ms",
+        sparsity["activated_expert_names"],
+        total_latency_ms,
+    )
+
     yield {
         "event": "done",
         "data": {

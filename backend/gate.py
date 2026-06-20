@@ -25,13 +25,13 @@ transparent rule, not a learned function.
 from __future__ import annotations
 
 import json
-import logging
 import re
 
 from classifier import score_complexity, score_privacy
+from log_config import get_logger
 from models import llama32_client
 
-logger = logging.getLogger("localmind.gate")
+logger = get_logger("gate")
 
 # Upper bound on how many sub-tasks a single query may be split into.
 MAX_SUBTASKS = 4
