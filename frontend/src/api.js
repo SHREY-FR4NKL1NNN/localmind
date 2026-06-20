@@ -6,37 +6,41 @@
 // on Windows; the backend listens on 127.0.0.1:8000.
 export const API_BASE = 'http://127.0.0.1:8000'
 
-// Route presentation: teal for the lightweight Mistral path, purple for the
-// high-capability DeepSeek R1 path. Both chosen to read well on light and dark.
-export const ROUTE_COLORS = {
-  mistral: '#1D9E75',
-  deepseek: '#7F77DD',
-}
-
-export function routeLabel(route) {
-  return route === 'deepseek' ? 'DeepSeek R1' : 'Mistral 7B'
-}
-
-export function routeColor(route) {
-  return ROUTE_COLORS[route] || '#6b7280'
-}
-
-// Expert presentation for the decomposed (MoE) flow. Keyed by the Ollama model
-// tag the gate emits. Mistral/DeepSeek reuse the route colors above; Llama 3.2
-// (fast tier) and LLaVA (vision tier) get their own so all four are distinct.
+// Single source of truth for expert presentation, keyed by the Ollama model tag
+// the gate emits. Colours are CSS custom properties (defined in index.css) so
+// components never hardcode hex — they reference the design-system token via the
+// returned `var(--expert-*)` string, which resolves inside inline styles.
 export const EXPERT_META = {
-  'llama3.2': { label: 'Llama 3.2', color: '#E0922F' },
-  mistral: { label: 'Mistral 7B', color: ROUTE_COLORS.mistral },
-  'deepseek-r1:7b': { label: 'DeepSeek R1', color: ROUTE_COLORS.deepseek },
-  llava: { label: 'LLaVA', color: '#C2569E' },
+  'llama3.2': { label: 'Llama 3.2', size: '3.2B', color: 'var(--expert-llama)', token: '--expert-llama' },
+  mistral: { label: 'Mistral 7B', size: '7B', color: 'var(--expert-mistral)', token: '--expert-mistral' },
+  'deepseek-r1:7b': { label: 'DeepSeek R1', size: '7B', color: 'var(--expert-deepseek)', token: '--expert-deepseek' },
+  llava: { label: 'LLaVA', size: '7B', color: 'var(--expert-llava)', token: '--expert-llava' },
 }
+
+// The four experts in canonical display order (used by the header dots).
+export const EXPERTS = ['llama3.2', 'mistral', 'deepseek-r1:7b', 'llava']
 
 export function expertLabel(expert) {
   return EXPERT_META[expert]?.label || expert
 }
 
+// Returns a `var(--expert-*)` token string for use as a dynamic inline style.
 export function expertColor(expert) {
-  return EXPERT_META[expert]?.color || '#6b7280'
+  return EXPERT_META[expert]?.color || 'var(--lm-text-muted)'
+}
+
+export function expertSize(expert) {
+  return EXPERT_META[expert]?.size || ''
+}
+
+// The single-route flow reports "mistral"/"deepseek"; map those onto the same
+// expert colours so the whole app stays consistent.
+export function routeLabel(route) {
+  return route === 'deepseek' ? 'DeepSeek R1' : 'Mistral 7B'
+}
+
+export function routeColor(route) {
+  return route === 'deepseek' ? 'var(--expert-deepseek)' : 'var(--expert-mistral)'
 }
 
 async function request(path, options) {
@@ -115,6 +119,10 @@ export async function streamDecomposed({ query, imageBase64 = null, onEvent, sig
 
 export function getStats() {
   return request('/stats')
+}
+
+export function getExpertStats() {
+  return request('/expert-stats')
 }
 
 export function getHistory() {

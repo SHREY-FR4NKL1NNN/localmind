@@ -38,7 +38,7 @@ export default function DecomposedPanel({ result }) {
     <div className="card">
       <h2 className="card__title">Decomposed result (MoE)</h2>
 
-      <span className="badge badge--lg" style={{ background: '#7F77DD' }}>
+      <span className="badge badge--lg" style={{ background: 'var(--expert-mistral)' }}>
         {result.decomposed
           ? `${subtasks.length} sub-task${subtasks.length === 1 ? '' : 's'}`
           : 'Single ask — not decomposed'}
