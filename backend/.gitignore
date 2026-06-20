@@ -1,0 +1,15 @@
+# Local SQLite database (runtime data — not committed)
+localmind.db
+localmind.db-journal
+localmind.db-wal
+localmind.db-shm
+
+# Exported logs
+*.export.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
