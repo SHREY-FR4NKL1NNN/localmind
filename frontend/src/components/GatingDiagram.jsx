@@ -12,6 +12,13 @@ function truncate(text, n) {
   return text.length > n ? `${text.slice(0, n - 1)}…` : text
 }
 
+// Truncate to roughly fit a pixel width. A conservative per-character estimate;
+// an SVG clip-path on each node is the hard guarantee against any overflow.
+function fitText(text, pxWidth, fontPx = 12) {
+  const maxChars = Math.max(4, Math.floor(pxWidth / (fontPx * 0.62)))
+  return truncate(text, maxChars)
+}
+
 // One connecting path. A dim static line (permanent routing evidence) plus a
 // bright traveling dot overlay that animates once via stroke-dashoffset.
 function FlowPath({ d, color, delay }) {
@@ -29,7 +36,7 @@ function buildLayout(subtasks, decomposed, vertical) {
   const n = subtasks.length
   if (vertical) {
     const vb = { w: 340, h: 260 }
-    const query = { x: 90, y: 10, w: 160, h: 44 }
+    const query = { x: 40, y: 10, w: 260, h: 44 }
     const gate = { cx: 170, cy: 120, r: 28 }
     const gap = 8
     const ew = Math.max(60, (vb.w - 24 - (n - 1) * gap) / n)
@@ -49,8 +56,8 @@ function buildLayout(subtasks, decomposed, vertical) {
     return { vb, query, gate, experts, queryAnchor, gatePre: { x: gate.cx, y: gate.cy - gate.r }, gatePost: { x: gate.cx, y: gate.cy + gate.r }, vertical }
   }
   const vb = { w: 640, h: 180 }
-  const query = { x: 14, y: 62, w: 140, h: 56 }
-  const gate = { cx: 320, cy: 90, r: 30 }
+  const query = { x: 14, y: 62, w: 196, h: 56 }
+  const gate = { cx: 330, cy: 90, r: 30 }
   const ew = 168
   const ex = vb.w - ew - 8
   const eh = 44
@@ -104,6 +111,47 @@ function GhostDiagram({ vertical }) {
   )
 }
 
+// Query box — text is fitted to width and hard-clipped to the rounded rect.
+function QueryNode({ box, text }) {
+  return (
+    <g className="gd-node">
+      <rect x={box.x} y={box.y} width={box.w} height={box.h} rx="10" className="gd-node-rect" />
+      <clipPath id="gd-clip-query">
+        <rect x={box.x} y={box.y} width={box.w} height={box.h} rx="10" />
+      </clipPath>
+      <g clipPath="url(#gd-clip-query)">
+        <text className="gd-node-kicker" x={box.x + 12} y={box.y + 18}>Query</text>
+        <text className="gd-node-text" x={box.x + 12} y={box.y + 38}>{fitText(text, box.w - 24)}</text>
+      </g>
+    </g>
+  )
+}
+
+// Expert box — name + (optional) complexity score on the top line, fitted
+// sub-task below, everything clipped so nothing escapes the card.
+function ExpertNode({ box, clipId, expert, subtask, complexity, color, delay }) {
+  const style = { '--exp': color }
+  if (delay != null) style['--gd-delay'] = `${delay}ms`
+  return (
+    <g className="gd-node gd-node--expert" style={style}>
+      <rect x={box.x} y={box.y} width={box.w} height={box.h} rx="8" className="gd-expert-rect" />
+      <rect x={box.x} y={box.y} width="4" height={box.h} className="gd-expert-bar" />
+      <clipPath id={clipId}>
+        <rect x={box.x} y={box.y} width={box.w} height={box.h} rx="8" />
+      </clipPath>
+      <g clipPath={`url(#${clipId})`}>
+        <text className="gd-expert-name" x={box.x + 14} y={box.y + 17}>{expertLabel(expert)}</text>
+        {complexity != null && (
+          <text className="gd-expert-cx" x={box.x + box.w - 10} y={box.y + 17} textAnchor="end">
+            c {Number(complexity).toFixed(2)}
+          </text>
+        )}
+        <text className="gd-node-text" x={box.x + 14} y={box.y + 34}>{fitText(subtask, box.w - 24)}</text>
+      </g>
+    </g>
+  )
+}
+
 export default function GatingDiagram({ query, subtasks }) {
   const vertical = useMediaQuery('(max-width: 768px)')
 
@@ -124,17 +172,14 @@ export default function GatingDiagram({ query, subtasks }) {
       <div className="gating" key={query}>
         <svg viewBox={`0 0 ${L.vb.w} ${L.vb.h}`} className="gating__svg" preserveAspectRatio="xMidYMid meet">
           <FlowPath d={curve(L.queryAnchor, L.experts[0].anchor, vertical)} color={color} delay={100} />
-          <g className="gd-node">
-            <rect x={L.query.x} y={L.query.y} width={L.query.w} height={L.query.h} rx="10" className="gd-node-rect" />
-            <text className="gd-node-kicker" x={L.query.x + 12} y={L.query.y + 18}>Query</text>
-            <text className="gd-node-text" x={L.query.x + 12} y={L.query.y + 38}>{truncate(query, 40)}</text>
-          </g>
-          <g className="gd-node" style={{ '--exp': color }}>
-            <rect x={L.experts[0].x} y={L.experts[0].y} width={L.experts[0].w} height={L.experts[0].h} rx="8" className="gd-expert-rect" />
-            <rect x={L.experts[0].x} y={L.experts[0].y} width="4" height={L.experts[0].h} className="gd-expert-bar" />
-            <text className="gd-expert-name" x={L.experts[0].x + 14} y={L.experts[0].y + 18}>{expertLabel(e.expert)}</text>
-            <text className="gd-node-text" x={L.experts[0].x + 14} y={L.experts[0].y + 36}>{truncate(e.subtask, 30)}</text>
-          </g>
+          <QueryNode box={L.query} text={query} />
+          <ExpertNode
+            box={L.experts[0]}
+            clipId="gd-clip-e0"
+            expert={e.expert}
+            subtask={e.subtask}
+            color={color}
+          />
         </svg>
         <p className="gating__hint">Direct route — no decomposition needed</p>
       </div>
@@ -152,11 +197,7 @@ export default function GatingDiagram({ query, subtasks }) {
         ))}
 
         {/* Query node */}
-        <g className="gd-node">
-          <rect x={L.query.x} y={L.query.y} width={L.query.w} height={L.query.h} rx="10" className="gd-node-rect" />
-          <text className="gd-node-kicker" x={L.query.x + 12} y={L.query.y + 18}>Query</text>
-          <text className="gd-node-text" x={L.query.x + 12} y={L.query.y + 38}>{truncate(query, 40)}</text>
-        </g>
+        <QueryNode box={L.query} text={query} />
 
         {/* Gate node */}
         <g className="gd-node">
@@ -166,20 +207,18 @@ export default function GatingDiagram({ query, subtasks }) {
         </g>
 
         {/* Expert nodes */}
-        {L.experts.map((e, i) => {
-          const color = expertColor(e.st.expert)
-          return (
-            <g className="gd-node gd-node--expert" key={`e${i}`} style={{ '--exp': color, '--gd-delay': `${250 + i * 150}ms` }}>
-              <rect x={e.x} y={e.y} width={e.w} height={e.h} rx="8" className="gd-expert-rect" />
-              <rect x={e.x} y={e.y} width="4" height={e.h} className="gd-expert-bar" />
-              <text className="gd-expert-name" x={e.x + 14} y={e.y + 17}>{expertLabel(e.st.expert)}</text>
-              <text className="gd-node-text" x={e.x + 14} y={e.y + 33}>{truncate(e.st.subtask, 30)}</text>
-              <text className="gd-expert-cx" x={e.x + e.w - 10} y={e.y + 17} textAnchor="end">
-                {Number(e.st.complexity).toFixed(2)} complexity
-              </text>
-            </g>
-          )
-        })}
+        {L.experts.map((e, i) => (
+          <ExpertNode
+            key={`e${i}`}
+            box={e}
+            clipId={`gd-clip-e${i}`}
+            expert={e.st.expert}
+            subtask={e.st.subtask}
+            complexity={e.st.complexity}
+            color={expertColor(e.st.expert)}
+            delay={250 + i * 150}
+          />
+        ))}
       </svg>
     </div>
   )
