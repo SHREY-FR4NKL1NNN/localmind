@@ -87,7 +87,7 @@ llama3.2)           llava)
 | Fast / Gate | `llama3.2` (3.2B) | General + decomposition + combiner | Quick answers, JSON decomposition, synthesis | effective complexity `< 0.3`; also the gate and combiner |
 | Generalist | `mistral` (7B) | General-purpose | Balanced quality/latency | `0.3 ≤ complexity < 0.6`, or privacy-override |
 | Reasoner | `deepseek-r1:7b` (7B) | Multi-step reasoning | Comparison, analysis, technical depth | effective complexity `≥ 0.6` |
-| Vision | `llava` (7B) | Multimodal | Image understanding | any sub-task with an attached image (hard rule) |
+| Vision | `minicpm-v` (MiniCPM-V 2.6, 8B) | Multimodal | Image understanding, logo/text reading | any sub-task with an attached image (hard rule) |
 
 ## Routing Rules
 
@@ -169,6 +169,16 @@ expert_done (×N) → sparsity → combiner_token* → done`.
   code (including the cross-chunk carry buffer for split tags) is implemented and
   unit-tested, but is currently inactive against this model — the reasoning trace
   panel stays empty and no literal tags leak.
+- **Vision model accuracy.** The vision expert was upgraded from `llava` (7B,
+  Q4_0) to **MiniCPM-V 2.6 (8B)** for much stronger fine-grained recognition:
+  llava misidentified an NVIDIA RTX workstation card as "a PlayStation console,"
+  whereas MiniCPM-V reads the on-device "NVIDIA" logo and correctly identifies it
+  as an NVIDIA RTX-series GPU. It still can't always pin the exact SKU (e.g. it
+  guessed "RTX 3080" for an RTX 6000) — reading the small model wordmark is hard
+  when the vision encoder downsamples a wide marketing banner to a low-resolution
+  square. (Llama 3.2 Vision was evaluated as the upgrade but its `mllama`
+  architecture won't load on this Ollama build's `llama-server` runner — not a
+  VRAM issue; it fails at architecture parsing even on CPU.)
 - **Text combiner vs vector combination.** As above — a deliberate, documented
   deviation from textbook MoE, unavoidable when experts emit full text.
 

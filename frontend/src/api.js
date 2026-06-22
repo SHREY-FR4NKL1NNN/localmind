@@ -14,7 +14,7 @@ export const EXPERT_META = {
   'llama3.2': { label: 'Llama 3.2', size: '3.2B', color: 'var(--expert-llama)', token: '--expert-llama' },
   mistral: { label: 'Mistral 7B', size: '7B', color: 'var(--expert-mistral)', token: '--expert-mistral' },
   'deepseek-r1:7b': { label: 'DeepSeek R1', size: '7B', color: 'var(--expert-deepseek)', token: '--expert-deepseek' },
-  llava: { label: 'LLaVA', size: '7B', color: 'var(--expert-llava)', token: '--expert-llava' },
+  llava: { label: 'MiniCPM-V', size: '8B', color: 'var(--expert-llava)', token: '--expert-llava' },
 }
 
 // The four experts in canonical display order (used by the header dots).

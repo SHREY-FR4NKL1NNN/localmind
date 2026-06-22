@@ -54,7 +54,7 @@ queries.
 | **Llama 3.2**   | `llama3.2`       | Fast tier for trivial sub-tasks **+** the decomposition gate. |
 | **Mistral 7B**  | `mistral`        | General-purpose tier **+** the synthesis/combiner step.       |
 | **DeepSeek R1** | `deepseek-r1:7b` | Reasoning tier for complex / multi-step sub-tasks.            |
-| **LLaVA**       | `llava`          | Vision tier; image-bearing sub-tasks are hard-routed here.    |
+| **MiniCPM-V**   | `minicpm-v`      | Vision tier; image-bearing sub-tasks are hard-routed here.    |
 
 > **A note on "MoE".** This is a rule-based gate *inspired by* Mixture-of-Experts
 > routing — it reproduces the **behaviour** (sparse, input-dependent expert
@@ -214,7 +214,7 @@ Interactive docs are served at `/docs`.
   ollama pull llama3.2
   ollama pull mistral
   ollama pull deepseek-r1:7b
-  ollama pull llava
+  ollama pull minicpm-v   # vision expert
   ```
 
 - Python 3.12+ and Node.js 18+

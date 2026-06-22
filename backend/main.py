@@ -40,7 +40,8 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # Models LocalMind depends on, by their Ollama tag. The tiered MoE-inspired
 # system uses all four: Llama 3.2 (fast expert + gate), Mistral (general),
 # DeepSeek R1 (reasoning), and LLaVA (vision).
-REQUIRED_MODELS = ("llama3.2", "mistral", "deepseek-r1:7b", "llava")
+# "minicpm-v" backs the vision expert (see models/llava_client.py).
+REQUIRED_MODELS = ("llama3.2", "mistral", "deepseek-r1:7b", "minicpm-v")
 
 
 class QueryRequest(BaseModel):

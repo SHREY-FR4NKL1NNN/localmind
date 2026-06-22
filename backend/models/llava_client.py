@@ -27,8 +27,12 @@ STREAM_TIMEOUT = httpx.Timeout(120.0)
 # Ollama listens on 127.0.0.1. Override via OLLAMA_BASE_URL if needed.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-MODEL_NAME = "llava:latest"
-DISPLAY_NAME = "LLaVA"
+# Vision expert: MiniCPM-V 2.6 (8B). Upgraded from llava:7b (Q4_0) for much
+# stronger fine-grained recognition / logo+text reading. (Llama 3.2 Vision was
+# evaluated but its `mllama` architecture won't load on this Ollama runner.)
+# Shared by both generate() and stream().
+MODEL_NAME = "minicpm-v"
+DISPLAY_NAME = "MiniCPM-V"
 TIMEOUT_SECONDS = 45
 
 
