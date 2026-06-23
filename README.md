@@ -246,6 +246,40 @@ The dashboard is now at `http://localhost:5173`. Toggle **Decompose (MoE)** next
 to the Submit button to run the tiered flow and see the per-sub-task trace plus
 the synthesized answer.
 
+## Deployment
+
+The frontend is a static SPA (deployable to Vercel); the backend runs locally
+against Ollama and is exposed publicly via an ngrok tunnel. The frontend picks
+its backend URL from the `VITE_API_URL` env var (see `frontend/.env.example`),
+falling back to `http://127.0.0.1:8000` for local dev.
+
+### Frontend (Vercel)
+
+The frontend is deployed to Vercel. To deploy your own:
+
+1. Fork the repo.
+2. Import it to Vercel and set the **root directory** to `frontend` (the repo
+   root *is* `localmind`, so the frontend lives at `frontend/`).
+3. Add an environment variable: `VITE_API_URL=<your-backend-url>`.
+4. Deploy. (`frontend/vercel.json` already sets the build command, `dist` output,
+   and the SPA rewrite.)
+
+### Backend (local + ngrok)
+
+The backend runs locally with Ollama. To expose it:
+
+1. Start Ollama: `ollama serve`
+2. Start the backend: `cd backend && uvicorn main:app --port 8000`
+3. Expose it via ngrok: `ngrok http 8000`
+4. Update `VITE_API_URL` (in Vercel, or `frontend/.env.production`) with the new
+   ngrok URL and redeploy.
+
+> **CORS / ngrok notes.** `main.py` currently allows the `http://localhost:5173`
+> origin only — add your Vercel origin to the CORS `allow_origins` list so the
+> deployed frontend can call the backend. Also, ngrok's **free** tier serves a
+> browser-warning interstitial on the first request; if API calls come back as
+> HTML, send the `ngrok-skip-browser-warning` header or use a reserved domain.
+
 ## Testing
 
 The backend ships with a `pytest` suite that runs **without Ollama** — every
