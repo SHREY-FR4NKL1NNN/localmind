@@ -61,7 +61,7 @@ export function postQuery(query) {
 
 // Tiered MoE flow: decompose the query into sub-tasks, route each to an expert,
 // run them in parallel, and synthesize a unified answer. Optional base64 image
-// is forwarded so vision sub-tasks can hard-route to LLaVA.
+// is forwarded so vision sub-tasks can hard-route to the vision expert.
 export function postQueryDecomposed(query, imageBase64 = null) {
   return request('/query/decomposed', {
     method: 'POST',

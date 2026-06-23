@@ -13,7 +13,7 @@ Concretely, the gate has two responsibilities:
   obviously-simple queries and graceful fallback when the model's output cannot
   be parsed).
 * ``gate_score`` — assign a single sub-task to exactly one expert. Image-bearing
-  sub-tasks are *hard-routed* to the vision expert (LLaVA); everything else is
+  sub-tasks are *hard-routed* to the vision expert (MiniCPM-V); everything else is
   scored by the unchanged heuristic classifier and mapped to one of the three
   text experts.
 
@@ -342,8 +342,9 @@ async def decompose(query: str, has_image: bool, _depth: int = 0) -> list[dict]:
 def gate_score(subtask: str, depends_on_image: bool) -> dict:
     """Assign a single sub-task to exactly one expert.
 
-    Image-bearing sub-tasks are hard-routed to the vision expert (``llava``)
-    regardless of any complexity/privacy score — this is a hard rule the
+    Image-bearing sub-tasks are hard-routed to the vision expert (the ``llava``
+    slot, currently backed by MiniCPM-V) regardless of any complexity/privacy
+    score — this is a hard rule the
     heuristic classifier cannot override. All other sub-tasks are scored by the
     unchanged ``classifier`` heuristics; if the sub-task contains a
     comparison/analysis verb (see ``ANALYSIS_VERBS``) a fixed ``ANALYSIS_BOOST``
@@ -382,8 +383,8 @@ def gate_score(subtask: str, depends_on_image: bool) -> dict:
             "complexity": complexity,
             "privacy": privacy,
             "reasoning": (
-                "Sub-task depends on an image, so it is hard-routed to the LLaVA "
-                "vision expert regardless of its complexity/privacy score."
+                "Sub-task depends on an image, so it is hard-routed to the "
+                "MiniCPM-V vision expert regardless of its complexity/privacy score."
             ),
             "hard_routed": True,
         }

@@ -25,7 +25,7 @@ LocalMind borrows the *behavioural* shape of a Mixture-of-Experts layer.
   presence) and picks an expert from that.
 - **Heterogeneous experts** — the experts are genuinely different models with
   different strengths: a fast generalist (Llama 3.2), a balanced generalist
-  (Mistral), a heavy reasoner (DeepSeek R1), and a vision model (LLaVA).
+  (Mistral), a heavy reasoner (DeepSeek R1), and a vision model (MiniCPM-V).
 - **A gating function** that routes based on input, not a fixed pipeline.
 
 **What deliberately deviates:**
@@ -65,7 +65,7 @@ Subtask 1           Subtask 2 (+ image?)
   ▼                      ▼
 Expert A            Expert B
 (mistral /          (deepseek /
-llama3.2)           llava)
+llama3.2)           minicpm-v)
   │                      │
   └────────┬─────────────┘
            │  asyncio.gather()
@@ -88,6 +88,11 @@ llama3.2)           llava)
 | Generalist | `mistral` (7B) | General-purpose | Balanced quality/latency | `0.3 ≤ complexity < 0.6`, or privacy-override |
 | Reasoner | `deepseek-r1:7b` (7B) | Multi-step reasoning | Comparison, analysis, technical depth | effective complexity `≥ 0.6` |
 | Vision | `minicpm-v` (MiniCPM-V 2.6, 8B) | Multimodal | Image understanding, logo/text reading | any sub-task with an attached image (hard rule) |
+
+> The vision expert's **internal routing key is `llava`** (the gate emits
+> `expert: "llava"`, and the client module is `llava_client.py`) — a stable
+> slot identifier retained from the original vision model. It is now **backed by
+> the `minicpm-v` Ollama model**; the UI displays it as "MiniCPM-V".
 
 ## Routing Rules
 

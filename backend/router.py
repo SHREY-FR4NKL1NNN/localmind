@@ -41,7 +41,7 @@ _STREAM_EXPERT_CLIENTS = {
 }
 
 # Maps a gate-assigned expert name to the client coroutine that serves it. Only
-# the LLaVA client takes an image, so it is dispatched separately below.
+# the vision client takes an image, so it is dispatched separately below.
 _TEXT_EXPERT_CLIENTS = {
     "llama3.2": llama32_client.generate,
     "mistral": mistral_client.generate,

@@ -1,7 +1,9 @@
-"""Async client for the LLaVA vision model served locally by Ollama.
+"""Async client for LocalMind's vision expert (MiniCPM-V) served by Ollama.
 
-LLaVA is LocalMind's *vision expert*: any sub-task that depends on an image is
-hard-routed here by the gate. It accepts an optional base64-encoded image which
+This is LocalMind's *vision expert*: any sub-task that depends on an image is
+hard-routed here by the gate. The model is MiniCPM-V (set via ``MODEL_NAME``);
+the module/expert-key name "llava" is retained as the vision-slot identifier.
+It accepts an optional base64-encoded image which
 is passed to Ollama under the multimodal ``images`` field. Its timeout is the
 most generous of the four models because vision inference is the heaviest. Like
 the other clients, this never raises — failures are returned as a structured
@@ -37,7 +39,7 @@ TIMEOUT_SECONDS = 45
 
 
 async def generate(prompt: str, image_base64: str | None = None) -> dict:
-    """Generate a completion from LLaVA via Ollama, optionally over an image.
+    """Generate a vision completion via Ollama, optionally over an image.
 
     Sends a non-streaming request to the local Ollama ``/api/generate``
     endpoint using ``httpx.AsyncClient``. When ``image_base64`` is provided it is
@@ -84,7 +86,7 @@ async def generate(prompt: str, image_base64: str | None = None) -> dict:
 async def stream(
     prompt: str, image_base64: str | None = None
 ) -> AsyncGenerator[dict, None]:
-    """Stream a vision completion from LLaVA token-by-token via Ollama.
+    """Stream a vision completion token-by-token via Ollama.
 
     Opens a streaming ``POST`` to Ollama's ``/api/generate`` with
     ``stream: true``; when ``image_base64`` is provided it is attached under
