@@ -54,7 +54,11 @@ queries.
 | **Llama 3.2**   | `llama3.2`       | Fast tier for trivial sub-tasks **+** the decomposition gate. |
 | **Mistral 7B**  | `mistral`        | General-purpose tier **+** the synthesis/combiner step.       |
 | **DeepSeek R1** | `deepseek-r1:7b` | Reasoning tier for complex / multi-step sub-tasks.            |
-| **LLaVA**       | `llava`          | Vision tier; image-bearing sub-tasks are hard-routed here.    |
+| **MiniCPM-V**   | `minicpm-v`      | Vision tier; image-bearing sub-tasks are hard-routed here.    |
+
+> The vision expert's internal routing key is `llava` (a stable slot id kept from
+> the original vision model, hence `llava_client.py`); it's now backed by the
+> `minicpm-v` model and shown as "MiniCPM-V" in the UI.
 
 > **A note on "MoE".** This is a rule-based gate *inspired by* Mixture-of-Experts
 > routing — it reproduces the **behaviour** (sparse, input-dependent expert
@@ -107,7 +111,7 @@ queries.
             ┌──────────────┬─────────────────┼─────────────────┐
             ▼              ▼                 ▼                 ▼
       ┌──────────┐  ┌────────────┐   ┌──────────────┐   ┌──────────┐
-      │ Llama 3.2│  │ Mistral 7B │   │ DeepSeek R1  │   │  LLaVA   │
+      │ Llama 3.2│  │ Mistral 7B │   │ DeepSeek R1  │   │MiniCPM-V │
       │  (fast)  │  │ (general)  │   │ (reasoning)  │   │ (vision) │
       └────┬─────┘  └─────┬──────┘   └──────┬───────┘   └────┬─────┘
            └──────────────┴────────┬────────┴────────────────┘
@@ -214,7 +218,7 @@ Interactive docs are served at `/docs`.
   ollama pull llama3.2
   ollama pull mistral
   ollama pull deepseek-r1:7b
-  ollama pull llava
+  ollama pull minicpm-v   # vision expert
   ```
 
 - Python 3.12+ and Node.js 18+
@@ -263,7 +267,7 @@ What's covered:
   short-query short-circuit (no model call), valid-JSON decomposition, graceful
   fallback on invalid JSON, and the auto-added vision sub-task for images.
 - **`test_combiner.py`** — `combiner.combine`: single-sub-task skip, multi
-  synthesis, and the `Image analysis:` labelling of LLaVA results.
+  synthesis, and the `Image analysis:` labelling of vision-expert results.
 - **`test_router.py`** — `router.route_decomposed`: parallel fan-out + sparsity,
   the full return shape, and one expert erroring without crashing the others.
 - **`test_api.py`** — FastAPI integration via `httpx.AsyncClient` + `ASGITransport`
@@ -380,7 +384,7 @@ localmind/
 │   │   ├── llama32_client.py   # fast expert + decomposition gate (structured outputs) + combiner
 │   │   ├── mistral_client.py   # general expert
 │   │   ├── deepseek_client.py  # reasoning expert (+ <think> trace stripping)
-│   │   └── llava_client.py     # vision expert (multimodal)
+│   │   └── llava_client.py     # vision expert (multimodal) — MiniCPM-V
 │   ├── logger.py          # SQLite query_log: history/stats/expert-stats/export (SQL aggregates)
 │   ├── log_config.py      # shared structured logging (localmind.* → stdout)
 │   ├── tests/             # pytest suite (classifier, gate, combiner, router, api); Ollama mocked

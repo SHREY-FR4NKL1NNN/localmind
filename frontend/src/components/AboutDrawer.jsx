@@ -17,7 +17,7 @@ export default function AboutDrawer({ open, onClose }) {
         <div className="drawer__section">
           <span className="drawer__kicker">Architecture</span>
           <ul className="drawer__list">
-            <li>4 experts: Llama 3.2, Mistral, DeepSeek R1, LLaVA</li>
+            <li>4 experts: Llama 3.2, Mistral, DeepSeek R1, MiniCPM-V</li>
             <li>Rule-based, explainable gate (Llama 3.2)</li>
             <li>Decompose → gate → parallel → combine</li>
             <li>Fully local — nothing leaves the machine</li>

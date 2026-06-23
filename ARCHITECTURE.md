@@ -25,7 +25,7 @@ LocalMind borrows the *behavioural* shape of a Mixture-of-Experts layer.
   presence) and picks an expert from that.
 - **Heterogeneous experts** — the experts are genuinely different models with
   different strengths: a fast generalist (Llama 3.2), a balanced generalist
-  (Mistral), a heavy reasoner (DeepSeek R1), and a vision model (LLaVA).
+  (Mistral), a heavy reasoner (DeepSeek R1), and a vision model (MiniCPM-V).
 - **A gating function** that routes based on input, not a fixed pipeline.
 
 **What deliberately deviates:**
@@ -65,7 +65,7 @@ Subtask 1           Subtask 2 (+ image?)
   ▼                      ▼
 Expert A            Expert B
 (mistral /          (deepseek /
-llama3.2)           llava)
+llama3.2)           minicpm-v)
   │                      │
   └────────┬─────────────┘
            │  asyncio.gather()
@@ -87,7 +87,12 @@ llama3.2)           llava)
 | Fast / Gate | `llama3.2` (3.2B) | General + decomposition + combiner | Quick answers, JSON decomposition, synthesis | effective complexity `< 0.3`; also the gate and combiner |
 | Generalist | `mistral` (7B) | General-purpose | Balanced quality/latency | `0.3 ≤ complexity < 0.6`, or privacy-override |
 | Reasoner | `deepseek-r1:7b` (7B) | Multi-step reasoning | Comparison, analysis, technical depth | effective complexity `≥ 0.6` |
-| Vision | `llava` (7B) | Multimodal | Image understanding | any sub-task with an attached image (hard rule) |
+| Vision | `minicpm-v` (MiniCPM-V 2.6, 8B) | Multimodal | Image understanding, logo/text reading | any sub-task with an attached image (hard rule) |
+
+> The vision expert's **internal routing key is `llava`** (the gate emits
+> `expert: "llava"`, and the client module is `llava_client.py`) — a stable
+> slot identifier retained from the original vision model. It is now **backed by
+> the `minicpm-v` Ollama model**; the UI displays it as "MiniCPM-V".
 
 ## Routing Rules
 
@@ -169,6 +174,16 @@ expert_done (×N) → sparsity → combiner_token* → done`.
   code (including the cross-chunk carry buffer for split tags) is implemented and
   unit-tested, but is currently inactive against this model — the reasoning trace
   panel stays empty and no literal tags leak.
+- **Vision model accuracy.** The vision expert was upgraded from `llava` (7B,
+  Q4_0) to **MiniCPM-V 2.6 (8B)** for much stronger fine-grained recognition:
+  llava misidentified an NVIDIA RTX workstation card as "a PlayStation console,"
+  whereas MiniCPM-V reads the on-device "NVIDIA" logo and correctly identifies it
+  as an NVIDIA RTX-series GPU. It still can't always pin the exact SKU (e.g. it
+  guessed "RTX 3080" for an RTX 6000) — reading the small model wordmark is hard
+  when the vision encoder downsamples a wide marketing banner to a low-resolution
+  square. (Llama 3.2 Vision was evaluated as the upgrade but its `mllama`
+  architecture won't load on this Ollama build's `llama-server` runner — not a
+  VRAM issue; it fails at architecture parsing even on CPU.)
 - **Text combiner vs vector combination.** As above — a deliberate, documented
   deviation from textbook MoE, unavoidable when experts emit full text.
 

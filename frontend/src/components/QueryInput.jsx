@@ -1,14 +1,35 @@
 import { useRef, useState } from 'react'
 import { postQuery, postQueryDecomposed } from '../api'
 
-// Read a File into a raw base64 string (no data-URL prefix) plus a preview URL.
+// Longest edge (px) the uploaded image is downscaled to before sending — keeps
+// the base64 payload small and inference fast without losing useful detail.
+const MAX_IMAGE_DIM = 1024
+
+// Read a File and re-encode it to PNG via a canvas, returning a raw base64
+// string (no data-URL prefix) plus a preview URL. The re-encode matters: the
+// backend's image decoder (Ollama / stb_image) can't read WEBP/AVIF, so we
+// normalise whatever the browser can display into PNG, which it always can.
 function readImage(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => {
-      const dataUrl = String(reader.result)
-      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
-      resolve({ base64, dataUrl })
+      const img = new Image()
+      img.onload = () => {
+        let { naturalWidth: w, naturalHeight: h } = img
+        if (Math.max(w, h) > MAX_IMAGE_DIM) {
+          const scale = MAX_IMAGE_DIM / Math.max(w, h)
+          w = Math.round(w * scale)
+          h = Math.round(h * scale)
+        }
+        const canvas = document.createElement('canvas')
+        canvas.width = w
+        canvas.height = h
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h)
+        const pngDataUrl = canvas.toDataURL('image/png')
+        resolve({ base64: pngDataUrl.split(',')[1], dataUrl: pngDataUrl })
+      }
+      img.onerror = () => reject(new Error('Could not decode image'))
+      img.src = String(reader.result)
     }
     reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)

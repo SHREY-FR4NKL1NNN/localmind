@@ -39,8 +39,8 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 # Models LocalMind depends on, by their Ollama tag. The tiered MoE-inspired
 # system uses all four: Llama 3.2 (fast expert + gate), Mistral (general),
-# DeepSeek R1 (reasoning), and LLaVA (vision).
-REQUIRED_MODELS = ("llama3.2", "mistral", "deepseek-r1:7b", "llava")
+# DeepSeek R1 (reasoning), and MiniCPM-V (vision; see models/llava_client.py).
+REQUIRED_MODELS = ("llama3.2", "mistral", "deepseek-r1:7b", "minicpm-v")
 
 
 class QueryRequest(BaseModel):
@@ -55,7 +55,7 @@ class DecomposedQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="The user query to decompose and route.")
     image_base64: str | None = Field(
         default=None,
-        description="Optional base64-encoded image; sub-tasks needing it hard-route to LLaVA.",
+        description="Optional base64-encoded image; sub-tasks needing it hard-route to the vision expert.",
     )
 
 
@@ -67,7 +67,7 @@ class SubtaskDecision(BaseModel):
     complexity: float
     privacy: float
     reasoning: str
-    hard_routed: bool = Field(..., description="True only when hard-routed to LLaVA for an image.")
+    hard_routed: bool = Field(..., description="True only when hard-routed to the vision expert for an image.")
     response: str
     latency_ms: int
     depth: int = Field(..., description="Recursion depth; 0 for top-level sub-tasks, 1+ for nested ones.")
@@ -87,7 +87,7 @@ class SparsityInfo(BaseModel):
     experts_activated: int = Field(..., description="Distinct experts that actually ran.")
     experts_available: int = Field(..., description="Total experts in the tiered system (4).")
     sparsity_ratio: float = Field(..., description="experts_activated / experts_available.")
-    vision_activated: bool = Field(..., description="True if the LLaVA vision expert ran.")
+    vision_activated: bool = Field(..., description="True if the MiniCPM-V vision expert ran.")
     activated_expert_names: list[str] = Field(..., description="Sorted distinct expert tags that ran.")
 
 
