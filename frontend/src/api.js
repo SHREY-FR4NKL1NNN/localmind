@@ -46,8 +46,15 @@ export function routeColor(route) {
   return route === 'deepseek' ? 'var(--expert-deepseek)' : 'var(--expert-mistral)'
 }
 
-async function request(path, options) {
-  const res = await fetch(`${API_BASE}${path}`, options)
+async function request(path, options = {}) {
+  // `ngrok-skip-browser-warning` tells ngrok's free edge not to serve its HTML
+  // interstitial, so API calls get JSON. Merged into every request that goes
+  // through this helper (POST /query, /query/decomposed, and all the GETs),
+  // preserving any caller-provided headers.
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { 'ngrok-skip-browser-warning': 'true', ...(options.headers || {}) },
+  })
   if (!res.ok) {
     throw new Error(`Request to ${path} failed with status ${res.status}`)
   }
@@ -96,7 +103,10 @@ function parseSSEEvent(raw) {
 export async function streamDecomposed({ query, imageBase64 = null, onEvent, signal }) {
   const res = await fetch(`${API_BASE}/query/decomposed/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': 'true',
+    },
     body: JSON.stringify({ query, image_base64: imageBase64 }),
     signal,
   })
