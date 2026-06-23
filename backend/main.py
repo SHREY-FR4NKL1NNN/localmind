@@ -27,6 +27,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 
 import router as router_module  # noqa: E402
 from log_config import get_logger  # noqa: E402
@@ -172,11 +173,33 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    # Starlette's allow_origins does EXACT string matching — a literal
+    # "https://*.vercel.app" entry would never match a real subdomain. Wildcard
+    # origins therefore go through allow_origin_regex: any *.vercel.app frontend
+    # and any ngrok-free tunnel (.app or the newer .dev domains).
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*(vercel\.app|ngrok-free\.(app|dev))",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ngrok's free edge serves an HTML browser-warning interstitial for requests it
+# treats as browser navigations. The skip header (sent by the client, and echoed
+# here) tells ngrok to let the request through so the frontend gets JSON, not the
+# warning page. Registered after CORS so CORS keeps wrapping all route handling.
+class NgrokHeaderMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["ngrok-skip-browser-warning"] = "true"
+        return response
+
+
+app.add_middleware(NgrokHeaderMiddleware)
 
 
 @app.exception_handler(Exception)

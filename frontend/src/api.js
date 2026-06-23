@@ -2,9 +2,12 @@
 // helpers. Every request throws on a non-2xx response or network failure so
 // callers can surface a clear "backend unreachable" message in the UI.
 
-// IPv4 loopback to avoid a possible IPv6 (::1) resolution stall for "localhost"
-// on Windows; the backend listens on 127.0.0.1:8000.
-export const API_BASE = 'http://127.0.0.1:8000'
+// Backend base URL. In production builds (e.g. on Vercel) this comes from the
+// VITE_API_URL env var — point it at the public backend (an ngrok tunnel to the
+// local FastAPI server). Locally it falls back to the IPv4 loopback (127.0.0.1,
+// not "localhost", to avoid a possible IPv6 (::1) resolution stall on Windows);
+// the backend listens on 127.0.0.1:8000.
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 // Single source of truth for expert presentation, keyed by the Ollama model tag
 // the gate emits. Colours are CSS custom properties (defined in index.css) so
@@ -43,8 +46,15 @@ export function routeColor(route) {
   return route === 'deepseek' ? 'var(--expert-deepseek)' : 'var(--expert-mistral)'
 }
 
-async function request(path, options) {
-  const res = await fetch(`${API_BASE}${path}`, options)
+async function request(path, options = {}) {
+  // `ngrok-skip-browser-warning` tells ngrok's free edge not to serve its HTML
+  // interstitial, so API calls get JSON. Merged into every request that goes
+  // through this helper (POST /query, /query/decomposed, and all the GETs),
+  // preserving any caller-provided headers.
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { 'ngrok-skip-browser-warning': 'true', ...(options.headers || {}) },
+  })
   if (!res.ok) {
     throw new Error(`Request to ${path} failed with status ${res.status}`)
   }
@@ -93,7 +103,10 @@ function parseSSEEvent(raw) {
 export async function streamDecomposed({ query, imageBase64 = null, onEvent, signal }) {
   const res = await fetch(`${API_BASE}/query/decomposed/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': 'true',
+    },
     body: JSON.stringify({ query, image_base64: imageBase64 }),
     signal,
   })

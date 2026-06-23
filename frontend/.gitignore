@@ -1,0 +1,8 @@
+# Local env files (never commit the real backend/ngrok URL)
+.env.production
+.env.local
+.env.*.local
+
+# Build output & deps (also covered by the repo-root .gitignore)
+dist/
+node_modules/
