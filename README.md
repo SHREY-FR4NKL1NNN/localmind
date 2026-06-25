@@ -4,6 +4,8 @@
 
 **Smart local LLM routing — the right model for the right query, entirely on your own machine.**
 
+🔗 **[Live demo → localmind-theta.vercel.app](https://localmind-theta.vercel.app)**
+
 > 📐 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design: the MoE
 > analogy (and where it deviates), routing rules, the streaming fan-in, and an
 > honest list of limitations.
