@@ -38,18 +38,24 @@ irrelevant — there's no API bill, after all. But the constraints just move:
 - **Privacy.** Even locally, minimising how sensitive data flows through larger,
   more capable models is good hygiene. LocalMind factors privacy sensitivity
   into its routing policy.
-- **Cost (by analogy).** The routing pattern here is exactly what you'd use to
-  cut spend in a hosted setup — LocalMind proves out the decision logic with
-  zero external dependencies and zero data leaving the machine.
+- **Cost.** The routing pattern is exactly what you'd use to cut spend in a
+  hosted setup: send trivial work to a cheap model, reserve the expensive one for
+  queries that need it. LocalMind proves the decision logic out locally, then runs
+  the *same* logic unchanged against a hosted provider in production.
 
-Everything is **fully local**: all inference goes through [Ollama](https://ollama.com)
-on `localhost`. No external API calls, no API keys, works offline.
+LocalMind is **model-agnostic**. The routing logic is decoupled from the inference
+backend by a small provider abstraction (`backend/provider.py`), so the same
+router drives **Ollama locally** (fully offline, no API keys) or a **hosted
+OpenAI-compatible provider** (OpenRouter in production) with no code change — only
+the `LLM_PROVIDER` env var and a key differ. See
+[Deployment & Architecture](#deployment--architecture).
 
 ## The four experts
 
-The tiered flow routes among four locally-served models. Llama 3.2 does double
-duty: it is both the fast expert *and* the gating network that decomposes
-queries.
+The tiered flow routes among four role-specialised models. Llama 3.2 does double
+duty: it is both the fast expert *and* the gate that decomposes queries (an
+LLM-driven decompose plus a heuristic per-sub-task score — not a learned gating
+network; see below).
 
 | Expert          | Ollama tag       | Role                                                          |
 | --------------- | ---------------- | ------------------------------------------------------------- |
@@ -248,39 +254,102 @@ The dashboard is now at `http://localhost:5173`. Toggle **Decompose (MoE)** next
 to the Submit button to run the tiered flow and see the per-sub-task trace plus
 the synthesized answer.
 
-## Deployment
+### Demo queries that fan out
 
-The frontend is a static SPA (deployable to Vercel); the backend runs locally
-against Ollama and is exposed publicly via an ngrok tunnel. The frontend picks
-its backend URL from the `VITE_API_URL` env var (see `frontend/.env.example`),
-falling back to `http://127.0.0.1:8000` for local dev.
+A single-topic prompt usually lights just one expert (it looks like a plain
+chatbot). These prompts genuinely fan out across experts — verified locally with
+`scripts/demo_probe.py`, which reports subtask count, activated experts, sparsity
+ratio, and whether the combiner ran:
+
+| Query | Experts | Sparsity |
+| ----- | ------- | -------- |
+| *"What is 2+2, and also compare transformer architectures to state space models for edge inference?"* | Llama 3.2 + DeepSeek R1 | 0.50 |
+| *"What is 10 times 10, and also analyze the tradeoffs between microservices and monoliths for a small startup."* | Llama 3.2 + DeepSeek R1 | 0.50 |
+| *"Describe in a few sentences how photosynthesis works, and separately compare it to cellular respiration and evaluate which releases more usable energy."* | Llama 3.2 + Mistral | 0.50 |
+
+The pattern that works: a **trivial front clause** (arithmetic, a one-word fact)
+joined by *"and also / and separately"* to a **second ask of a different
+complexity**, so the two land in different tiers and the combiner fuses them. Add
+an **image** to the query to pull in the vision expert for a higher-sparsity,
+3–4-expert demo.
+
+> These were probed against local Ollama. **TODO:** once the OpenRouter production
+> credit posts, re-run `python scripts/demo_probe.py --target <azure-url>` to
+> confirm the picks on the hosted models (the router scoring is identical, so they
+> should hold).
+
+## Deployment & Architecture
+
+LocalMind deploys as two pieces, with the routing logic deliberately decoupled
+from the inference backend:
+
+```
+Vercel (static SPA)  ──►  Azure Container Apps (FastAPI, stable HTTPS)
+                               │
+                               ▼
+                     provider abstraction (backend/provider.py)
+                       ├─ dev:  Ollama       (LLM_PROVIDER=ollama)
+                       └─ prod: OpenRouter    (LLM_PROVIDER=openrouter)
+```
+
+**Provider abstraction.** Every model client talks to an OpenAI-compatible
+endpoint through `backend/provider.py`, chosen by the `LLM_PROVIDER` env var
+(`ollama` | `openrouter` | `groq` | `azure`). A logical role→model map (`router`,
+`reasoning`, `general`, `vision`) decouples the code from concrete model names, so
+the same routing logic runs on local Ollama or a hosted provider unchanged. The
+gate's structured-output request maps to each provider's JSON mode
+(`response_format: json_object`), keeping decomposition deterministic everywhere.
+DeepSeek R1's reasoning is captured whether a provider emits inline `<think>` tags
+(Ollama) or a separate `reasoning` field (OpenRouter).
 
 ### Frontend (Vercel)
 
-The frontend is deployed to Vercel. To deploy your own:
+1. Import the repo to Vercel; set the **root directory** to `frontend`.
+2. Set `VITE_API_URL` to the backend's public URL (the Container Apps FQDN).
+3. Deploy. (`frontend/vercel.json` sets the build command, `dist` output, and the
+   SPA rewrite.)
 
-1. Fork the repo.
-2. Import it to Vercel and set the **root directory** to `frontend` (the repo
-   root *is* `localmind`, so the frontend lives at `frontend/`).
-3. Add an environment variable: `VITE_API_URL=<your-backend-url>`.
-4. Deploy. (`frontend/vercel.json` already sets the build command, `dist` output,
-   and the SPA rewrite.)
+### Backend (Azure Container Apps)
 
-### Backend (local + ngrok)
+The backend runs as a container on **Azure Container Apps** with a stable HTTPS
+URL — no tunnel. In production it runs `LLM_PROVIDER=openrouter`; the API key
+lives in the **Container Apps secret store**, never in the image or in git.
 
-The backend runs locally with Ollama. To expose it:
+ACR Tasks (server-side build) is unavailable on some subscriptions (e.g. Azure for
+Students), so build the image locally and push it, then deploy:
 
-1. Start Ollama: `ollama serve`
-2. Start the backend: `cd backend && uvicorn main:app --port 8000`
-3. Expose it via ngrok: `ngrok http 8000`
-4. Update `VITE_API_URL` (in Vercel, or `frontend/.env.production`) with the new
-   ngrok URL and redeploy.
+```bash
+# one-time: register providers + resource group
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+az provider register --namespace Microsoft.ContainerRegistry
+az group create -n localmind-rg -l centralindia
 
-> **CORS / ngrok notes.** `main.py` currently allows the `http://localhost:5173`
-> origin only — add your Vercel origin to the CORS `allow_origins` list so the
-> deployed frontend can call the backend. Also, ngrok's **free** tier serves a
-> browser-warning interstitial on the first request; if API calls come back as
-> HTML, send the `ngrok-skip-browser-warning` header or use a reserved domain.
+# build locally and push to your ACR
+az acr login -n <registry>
+docker build -t <registry>.azurecr.io/localmind:latest backend
+docker push  <registry>.azurecr.io/localmind:latest
+
+# deploy the image
+az containerapp up -n localmind-api -g localmind-rg \
+  --image <registry>.azurecr.io/localmind:latest \
+  --ingress external --target-port 8000 \
+  --registry-server <registry>.azurecr.io \
+  --env-vars LLM_PROVIDER=openrouter
+
+# attach the API key as a secret (never plaintext env)
+az containerapp secret set -n localmind-api -g localmind-rg --secrets openrouter-key=<KEY>
+az containerapp update     -n localmind-api -g localmind-rg \
+  --set-env-vars OPENROUTER_API_KEY=secretref:openrouter-key
+```
+
+`backend/Dockerfile` builds from `backend/` (non-root, `uvicorn main:app` on
+8000). `GET /health` reports the active provider and its configured models and
+does **not** depend on Ollama when a hosted provider is selected.
+
+**CORS.** `main.py` allows the Vite dev origin (`localhost:5173` / `127.0.0.1:5173`)
+and any `*.vercel.app` subdomain (preview + production deploys). The backend's own
+Azure origin is not a browser origin, so it is intentionally not listed.
 
 ## Testing
 
@@ -290,7 +359,8 @@ CI) need no GPU and no running models.
 
 ```bash
 cd localmind/backend
-pip install pytest pytest-asyncio httpx
+pip install -r requirements.txt   # includes httpx + the openai client
+pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
@@ -308,6 +378,9 @@ What's covered:
   the full return shape, and one expert erroring without crashing the others.
 - **`test_api.py`** — FastAPI integration via `httpx.AsyncClient` + `ASGITransport`
   for `/health`, `/expert-stats`, and `/query/decomposed`.
+- **`test_provider.py`** — the provider abstraction: role→model selection per
+  `LLM_PROVIDER`, the graceful "vision unavailable" path, response-format/option
+  translation, and DeepSeek R1 `<think>` / separate-`reasoning`-field extraction.
 
 CI runs the same suite plus `ruff` on every push to `main` / `feature/*` and on
 PRs (see `.github/workflows/ci.yml`).
@@ -319,6 +392,12 @@ at **`backend/localmind.db`** (table `query_log`) using the standard-library
 `sqlite3` module — no ORM, no extra dependency. History, aggregate stats, and
 per-expert utilisation are computed with SQL aggregates and survive restarts. The
 database file is git-ignored.
+
+> **Deployment tradeoff.** On Azure Container Apps the container filesystem is
+> ephemeral, so `localmind.db` **resets on every restart / new revision** — the
+> decision log is not durable in production. This is an accepted tradeoff for the
+> demo; durable storage via an Azure Files mount (pointing `LOCALMIND_DB` at the
+> share) is a documented next step.
 
 Export the full log to JSON for a demo or for sharing:
 

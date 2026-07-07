@@ -27,8 +27,8 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
-from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 
+import provider  # noqa: E402
 import router as router_module  # noqa: E402
 from log_config import get_logger  # noqa: E402
 from logger import decision_log  # noqa: E402
@@ -161,6 +161,10 @@ class HealthResponse(BaseModel):
     """Service health returned by ``GET /health``."""
 
     status: str
+    provider: str = "ollama"
+    # Reachability of the active inference backend. Named ``ollama`` for
+    # backward compatibility with the dashboard's health dot; for a hosted
+    # provider it reflects whether that provider is configured.
     ollama: str = Field(..., description='"reachable" or "unreachable".')
     models: list[str]
 
@@ -171,35 +175,24 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Allowed browser origins for the SPA dashboard:
+#   - http://localhost:5173 / http://127.0.0.1:5173  — the Vite dev server
+#   - any https://*.vercel.app subdomain             — the deployed dashboard
+# The backend itself runs on Azure Container Apps, which is not a browser origin
+# and so is intentionally absent here. See README "Deployment & Architecture".
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    # Starlette's allow_origins does EXACT string matching — a literal
-    # "https://*.vercel.app" entry would never match a real subdomain. Wildcard
-    # origins therefore go through allow_origin_regex: any *.vercel.app frontend
-    # and any ngrok-free tunnel (.app or the newer .dev domains).
-    allow_origin_regex=r"https://([a-z0-9-]+\.)*(vercel\.app|ngrok-free\.(app|dev))",
+    # Starlette's allow_origins does EXACT string matching, so wildcard Vercel
+    # subdomains (preview + production deploys) go through allow_origin_regex.
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ngrok's free edge serves an HTML browser-warning interstitial for requests it
-# treats as browser navigations. The skip header (sent by the client, and echoed
-# here) tells ngrok to let the request through so the frontend gets JSON, not the
-# warning page. Registered after CORS so CORS keeps wrapping all route handling.
-class NgrokHeaderMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["ngrok-skip-browser-warning"] = "true"
-        return response
-
-
-app.add_middleware(NgrokHeaderMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -279,23 +272,60 @@ def get_expert_stats() -> dict:
     return decision_log.get_expert_activation_stats()
 
 
+# Env var holding each hosted provider's credential — used only to report an
+# obvious misconfiguration in /health (no network call, no cost).
+_PROVIDER_KEY_ENV = {
+    "groq": "GROQ_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "azure": "AZURE_OPENAI_API_KEY",
+}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def get_health() -> dict:
-    """Report service health and live Ollama reachability.
+    """Report service health and inference-backend reachability.
 
-    Pings Ollama's ``/api/tags`` endpoint to confirm it is running and reports
-    which of the required models are currently available.
+    In local (``ollama``) mode this pings Ollama's ``/api/tags`` and reports which
+    required models are present. For a hosted provider it does **not** depend on
+    Ollama — it reports the configured models and whether the provider's API key
+    is set (a cheap config check, no billed call), so the service is deployable
+    without a local Ollama.
     """
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            resp.raise_for_status()
-            available = [m.get("name", "") for m in resp.json().get("models", [])]
-        present = [
-            required
-            for required in REQUIRED_MODELS
-            if any(name == required or name.startswith(required) for name in available)
-        ]
-        return {"status": "ok", "ollama": "reachable", "models": present}
-    except httpx.HTTPError:
-        return {"status": "ok", "ollama": "unreachable", "models": []}
+    if provider.PROVIDER == "ollama":
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+                resp.raise_for_status()
+                available = [m.get("name", "") for m in resp.json().get("models", [])]
+            present = [
+                required
+                for required in REQUIRED_MODELS
+                if any(
+                    name == required or name.startswith(required)
+                    for name in available
+                )
+            ]
+            return {
+                "status": "ok",
+                "provider": "ollama",
+                "ollama": "reachable",
+                "models": present,
+            }
+        except httpx.HTTPError:
+            return {
+                "status": "ok",
+                "provider": "ollama",
+                "ollama": "unreachable",
+                "models": [],
+            }
+
+    # Hosted provider: no Ollama dependency.
+    configured = [m for m in provider.MODEL_MAP.get(provider.PROVIDER, {}).values() if m]
+    key_env = _PROVIDER_KEY_ENV.get(provider.PROVIDER)
+    key_ok = bool(os.environ.get(key_env)) if key_env else True
+    return {
+        "status": "ok",
+        "provider": provider.PROVIDER,
+        "ollama": "reachable" if key_ok else "unreachable",
+        "models": configured,
+    }
