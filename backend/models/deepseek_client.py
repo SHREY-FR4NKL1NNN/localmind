@@ -1,24 +1,32 @@
-"""Async client for the DeepSeek R1 model served locally by Ollama.
+"""Client for LocalMind's reasoning expert (DeepSeek R1).
 
-DeepSeek R1 is LocalMind's high-capability reasoning path: it handles complex,
-multi-step, and technically demanding queries at the cost of higher latency and
-compute. Like the Mistral client, this never raises — failures are returned as a
-structured error dict so the router can degrade gracefully. HTTP is performed
-with ``httpx.AsyncClient`` so expert calls can be awaited concurrently.
+DeepSeek R1 is LocalMind's high-capability reasoning path — the provider's
+``reasoning`` role. Transport is delegated to ``provider`` (OpenAI-compatible:
+Ollama in dev, a hosted model in prod); this module keeps the historical
+``generate``/``stream`` API and ``model`` identity so the router and tests are
+unchanged. Never raises — failures come back as a structured error dict.
+
+R1 wraps its chain-of-thought in literal ``<think>...</think>`` tags inside the
+streamed text. ``stream`` strips those tags — tracking the ``inside_think`` state
+*across* chunks with a carry buffer, since a tag may be split across two chunks
+(e.g. ``"<thi"`` then ``"nk>"``) — and reports ``is_thinking`` per chunk so the
+reasoning trace can be surfaced separately from the final answer. This works
+regardless of transport as long as R1 emits the tags inline; a hosted provider
+that instead surfaces reasoning in a separate field would need handling here.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import time
 from collections.abc import AsyncGenerator
 
-import httpx
+import provider
 
-# Streaming keeps the connection open for the whole (long) reasoning generation,
-# so it uses a generous fixed timeout rather than the non-streaming budget above.
-STREAM_TIMEOUT = httpx.Timeout(120.0)
+MODEL_NAME = "deepseek-r1:7b"
+DISPLAY_NAME = "DeepSeek R1"
+ROLE = "reasoning"
+
+TIMEOUT_SECONDS = 60
+STREAM_TIMEOUT = 120
 
 # DeepSeek R1 wraps its chain-of-thought in these literal tags inside the
 # streamed text. They are detected and stripped so the reasoning can be surfaced
@@ -75,120 +83,67 @@ def _strip_think(buffer: str, inside_think: bool) -> tuple[str, bool, str]:
         i += 1
     return "".join(out), inside_think, carry
 
-# Default to the IPv4 loopback explicitly: on Windows, "localhost" can resolve
-# to IPv6 (::1) first and stall for seconds before falling back to IPv4, while
-# Ollama listens on 127.0.0.1. Override via OLLAMA_BASE_URL if needed.
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-MODEL_NAME = "deepseek-r1:7b"
-DISPLAY_NAME = "DeepSeek R1"
-TIMEOUT_SECONDS = 60
-
 
 async def generate(prompt: str) -> dict:
-    """Generate a completion from DeepSeek R1 via Ollama.
-
-    Sends a non-streaming request to the local Ollama ``/api/generate``
-    endpoint using ``httpx.AsyncClient``. On success returns
-    ``{"response", "latency_ms", "model"}``. On any connection error or timeout
-    returns the same shape with an additional ``error`` key and an empty
-    ``response`` — this coroutine never raises.
-    """
-    start = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                GENERATE_URL,
-                json={"model": MODEL_NAME, "prompt": prompt, "stream": False},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return {
-            "response": (data.get("response") or "").strip(),
-            "latency_ms": latency_ms,
-            "model": MODEL_NAME,
-        }
-    except httpx.TimeoutException:
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return {
-            "response": "",
-            "latency_ms": latency_ms,
-            "model": MODEL_NAME,
-            "error": f"{DISPLAY_NAME} request timed out after {TIMEOUT_SECONDS}s.",
-        }
-    except httpx.HTTPError as exc:
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return {
-            "response": "",
-            "latency_ms": latency_ms,
-            "model": MODEL_NAME,
-            "error": f"Could not reach Ollama for {DISPLAY_NAME}: {exc}",
-        }
+    """Non-streaming completion. Returns ``{"response", "latency_ms", "model"}``
+    (plus ``"error"`` on failure)."""
+    return await provider.complete(
+        ROLE, prompt, model_label=MODEL_NAME, timeout=TIMEOUT_SECONDS
+    )
 
 
 async def stream(
     prompt: str, image_base64: str | None = None
 ) -> AsyncGenerator[dict, None]:
-    """Stream a completion from DeepSeek R1, separating its reasoning trace.
+    """Stream token-by-token, separating R1's reasoning trace.
 
-    Opens a streaming ``POST`` to Ollama's ``/api/generate`` with
-    ``stream: true``. DeepSeek R1 wraps its chain-of-thought in literal
-    ``<think>...</think>`` tags within the streamed text; these tags are stripped
-    and the running ``inside_think`` state is tracked **across** chunks (a tag may
-    be split, e.g. ``"<thi"`` then ``"nk>"``, which a carry buffer reassembles).
-
-    Yields one ``{"token", "done", "model", "is_thinking"}`` dict per decoded
-    chunk, where ``token`` has the tag text removed and ``is_thinking`` reflects
-    the ``inside_think`` state *after* that chunk's tags were processed.
-    ``image_base64`` is accepted for signature parity but ignored (text-only).
-    Empty/garbled lines are skipped silently; a connection error or timeout
-    yields exactly one terminal error chunk and stops — it never raises.
+    Yields one ``{"token", "done", "model", "is_thinking"}`` dict per chunk,
+    where ``token`` has the ``<think>``/``</think>`` tags removed and
+    ``is_thinking`` reflects the state *after* that chunk's tags were processed.
+    ``image_base64`` is accepted for signature parity but ignored (text-only). A
+    provider/transport error yields exactly one terminal error chunk.
     """
-    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": True}
     inside_think = False
     carry = ""
-    try:
-        async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
-            async with client.stream("POST", GENERATE_URL, json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    done = bool(data.get("done", False))
-                    visible, inside_think, carry = _strip_think(
-                        carry + data.get("response", ""), inside_think
-                    )
-                    if done and carry:
-                        # Stream ended on a dangling partial tag — it was never a
-                        # real tag, so flush it as literal text.
-                        visible += carry
-                        carry = ""
-                    yield {
-                        "token": visible,
-                        "done": done,
-                        "model": MODEL_NAME,
-                        "is_thinking": inside_think,
-                    }
-                    if done:
-                        return
-    except httpx.TimeoutException:
+    async for chunk in provider.stream_tokens(
+        ROLE, prompt, model_label=MODEL_NAME, timeout=STREAM_TIMEOUT
+    ):
+        if chunk.get("error"):
+            yield {
+                "token": "",
+                "done": True,
+                "model": MODEL_NAME,
+                "is_thinking": False,
+                "error": chunk["error"],
+            }
+            return
+
+        # Reasoning delivered in a separate field (e.g. OpenRouter R1): it is
+        # already isolated, so surface it as a thinking token directly — no tag
+        # stripping needed.
+        if chunk.get("reasoning"):
+            yield {
+                "token": chunk.get("token", ""),
+                "done": False,
+                "model": MODEL_NAME,
+                "is_thinking": True,
+            }
+            continue
+
+        done = bool(chunk.get("done", False))
+        visible, inside_think, carry = _strip_think(
+            carry + chunk.get("token", ""), inside_think
+        )
+        if done and carry:
+            # Stream ended on a dangling partial tag — it was never a real tag,
+            # so flush it as literal text.
+            visible += carry
+            carry = ""
         yield {
-            "token": "",
-            "done": True,
+            "token": visible,
+            "done": done,
             "model": MODEL_NAME,
-            "is_thinking": False,
-            "error": f"{DISPLAY_NAME} stream timed out after 120s.",
+            "is_thinking": inside_think,
         }
-    except httpx.HTTPError as exc:
-        yield {
-            "token": "",
-            "done": True,
-            "model": MODEL_NAME,
-            "is_thinking": False,
-            "error": f"Could not reach Ollama for {DISPLAY_NAME}: {exc}",
-        }
+        if done:
+            return

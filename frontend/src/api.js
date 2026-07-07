@@ -3,10 +3,10 @@
 // callers can surface a clear "backend unreachable" message in the UI.
 
 // Backend base URL. In production builds (e.g. on Vercel) this comes from the
-// VITE_API_URL env var — point it at the public backend (an ngrok tunnel to the
-// local FastAPI server). Locally it falls back to the IPv4 loopback (127.0.0.1,
-// not "localhost", to avoid a possible IPv6 (::1) resolution stall on Windows);
-// the backend listens on 127.0.0.1:8000.
+// VITE_API_URL env var — point it at the public backend (the Azure Container
+// Apps deployment). Locally it falls back to the IPv4 loopback (127.0.0.1, not
+// "localhost", to avoid a possible IPv6 (::1) resolution stall on Windows); the
+// backend listens on 127.0.0.1:8000.
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 // Single source of truth for expert presentation, keyed by the Ollama model tag
@@ -47,14 +47,7 @@ export function routeColor(route) {
 }
 
 async function request(path, options = {}) {
-  // `ngrok-skip-browser-warning` tells ngrok's free edge not to serve its HTML
-  // interstitial, so API calls get JSON. Merged into every request that goes
-  // through this helper (POST /query, /query/decomposed, and all the GETs),
-  // preserving any caller-provided headers.
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: { 'ngrok-skip-browser-warning': 'true', ...(options.headers || {}) },
-  })
+  const res = await fetch(`${API_BASE}${path}`, options)
   if (!res.ok) {
     throw new Error(`Request to ${path} failed with status ${res.status}`)
   }
@@ -105,7 +98,6 @@ export async function streamDecomposed({ query, imageBase64 = null, onEvent, sig
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
     },
     body: JSON.stringify({ query, image_base64: imageBase64 }),
     signal,

@@ -1,4 +1,4 @@
-# Local env files (never commit the real backend/ngrok URL)
+# Local env files (never commit the real backend URL)
 .env.production
 .env.local
 .env.*.local
